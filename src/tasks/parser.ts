@@ -54,7 +54,7 @@ export function formatTaskTitle(title: string, status: TaskStatus): string {
 export function inferTaskStatus(
   labels: readonly string[],
   title: string,
-): TaskStatus {
+): TaskStatus | undefined {
   const labeledStatuses: TaskStatus[] = [];
   for (const label of labels) {
     const status = statusFromLabel(label);
@@ -65,7 +65,7 @@ export function inferTaskStatus(
 
   const titleStatus = parseTaskTitle(title).status;
   if (labeledStatuses.length === 0) {
-    return titleStatus ?? "BACKLOG";
+    return titleStatus;
   }
   if (titleStatus !== undefined && labeledStatuses.includes(titleStatus)) {
     return titleStatus;

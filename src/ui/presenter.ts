@@ -4,7 +4,7 @@ import type { TaskIssue } from "../tasks/types.js";
 
 export interface BoardTask {
   number: number;
-  status: TaskStatus;
+  status: TaskStatus | null;
   title: string;
   fullTitle: string;
   body: string;
@@ -17,7 +17,7 @@ export interface BoardTask {
 export function presentTask(issue: TaskIssue): BoardTask {
   return {
     number: issue.number,
-    status: taskStatus(issue),
+    status: taskStatus(issue) ?? null,
     title: taskTitle(issue),
     fullTitle: issue.title,
     body: issue.body,

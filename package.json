@@ -1,6 +1,6 @@
 {
   "name": "gitasks",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A lightweight local task protocol for humans and coding agents, powered entirely by GitHub Issues.",
   "type": "module",
   "bin": {

@@ -5,10 +5,10 @@ This repository uses GitHub Issues as its task management source of truth.
 
 Before starting development work:
 
-1. Run `gitasks list`.
-2. Identify the relevant task.
-3. Run `gitasks start <issue-number>`.
-4. Read `.gitasks/protocol.md`.
+1. Read `.gitasks/protocol.md`.
+2. Run `gitasks list` and search existing issues for the same work.
+3. Reuse the relevant issue, or create one only when none exists.
+4. Run `gitasks start <issue-number>`.
 
 When implementation is ready for review, run:
 

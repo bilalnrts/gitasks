@@ -10,6 +10,7 @@ import type {
   IssueTransition,
   TaskIssue,
 } from "../src/tasks/types.js";
+import { isStatusLabel } from "../src/tasks/statuses.js";
 import {
   loadUiAssets,
   parseUiPort,
@@ -17,7 +18,11 @@ import {
   type BoardGateway,
   type RunningUiServer,
 } from "../src/ui/server.js";
-import { PartialCreateError, UserError } from "../src/utils/errors.js";
+import {
+  AmbiguousCreateError,
+  PartialCreateError,
+  UserError,
+} from "../src/utils/errors.js";
 
 const BASE_ISSUE: TaskIssue = {
   number: 12,
@@ -32,16 +37,22 @@ const BASE_ISSUE: TaskIssue = {
 class FakeBoardGateway implements BoardGateway {
   issue = { ...BASE_ISSUE, labels: [...BASE_ISSUE.labels] };
   createCalls = 0;
+  listCalls: Array<"open" | "closed" | "all"> = [];
   getCalls = 0;
   failTransition = false;
   failRecoveryRead = false;
   failClosedCreate = false;
+  failAmbiguousCreate = false;
   transitionDelayMs = 0;
   activeTransitions = 0;
   maxActiveTransitions = 0;
 
-  async listIssues(): Promise<TaskIssue[]> {
-    return [this.issue];
+  async listIssues(state: "open" | "closed" | "all"): Promise<TaskIssue[]> {
+    this.listCalls.push(state);
+    if (state === "all" || this.issue.state.toLowerCase() === state) {
+      return [this.issue];
+    }
+    return [];
   }
 
   async getIssue(): Promise<TaskIssue> {
@@ -54,6 +65,13 @@ class FakeBoardGateway implements BoardGateway {
 
   async createIssue(input: CreateIssueInput): Promise<TaskIssue> {
     this.createCalls += 1;
+    if (this.failAmbiguousCreate) {
+      throw new AmbiguousCreateError(
+        `Could not confirm whether GitHub created "${input.title}". Do not retry yet: check existing issues.`,
+        input.title,
+        "https://github.com/acme/example/issues",
+      );
+    }
     this.issue = {
       number: 13,
       title: input.title,
@@ -87,7 +105,10 @@ class FakeBoardGateway implements BoardGateway {
         ...this.issue,
         title: transition.title,
         state: transition.state === "closed" ? "CLOSED" : "OPEN",
-        labels: ["security", transition.nextStatusLabel],
+        labels: [
+          ...this.issue.labels.filter((label) => !isStatusLabel(label)),
+          transition.nextStatusLabel,
+        ],
       };
       return this.issue;
     } finally {
@@ -177,6 +198,77 @@ describe("packaged UI assets", () => {
       await assert.rejects(() => loadUiAssets(directory), /UI assets could not be loaded/);
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("board issue scope", () => {
+  test("defaults to open, supports closed/all, and read-only loads do not mutate issues", async () => {
+    const gateway = new FakeBoardGateway();
+    const { running, assetDirectory } = await startTestServer(gateway);
+    try {
+      const open = await fetch(`${running.url}/api/board`);
+      assert.equal(open.status, 200);
+      assert.deepEqual(await open.json() as { state: string; complete: boolean }, {
+        repository: "acme/example",
+        state: "open",
+        scope: "Open GitHub Issues; search covers every loaded issue; pull requests excluded",
+        complete: true,
+        statuses: [
+          { name: "BACKLOG", slug: "backlog", color: "BFD4F2" },
+          { name: "TODO", slug: "todo", color: "FBCA04" },
+          { name: "IN PROGRESS", slug: "in-progress", color: "1D76DB" },
+          { name: "REVIEW", slug: "review", color: "A371F7" },
+          { name: "DONE", slug: "done", color: "0E8A16" },
+          { name: "BLOCKED", slug: "blocked", color: "D73A4A" },
+        ],
+        tasks: [{
+          number: 12,
+          status: "TODO",
+          title: "Secure local API",
+          fullTitle: "[TODO] Secure local API",
+          body: "Keep GitHub credentials on the local server.",
+          state: "OPEN",
+          labels: ["security"],
+          assignees: ["octocat"],
+          url: "https://github.com/acme/example/issues/12",
+        }],
+      });
+
+      gateway.issue = {
+        ...gateway.issue,
+        title: "Existing unclassified issue",
+        state: "CLOSED",
+        labels: ["security"],
+      };
+      const closed = await fetch(`${running.url}/api/board?state=closed`);
+      const closedPayload = await closed.json() as {
+        state: string;
+        tasks: Array<{ status: string | null; state: string; fullTitle: string }>;
+      };
+      assert.equal(closedPayload.state, "closed");
+      assert.deepEqual(closedPayload.tasks, [{
+        number: 12,
+        status: null,
+        title: "Existing unclassified issue",
+        fullTitle: "Existing unclassified issue",
+        body: "Keep GitHub credentials on the local server.",
+        state: "CLOSED",
+        labels: ["security"],
+        assignees: ["octocat"],
+        url: "https://github.com/acme/example/issues/12",
+      }]);
+
+      const all = await fetch(`${running.url}/api/board?state=all`);
+      assert.equal(all.status, 200);
+      assert.deepEqual(gateway.listCalls, ["open", "closed", "all"]);
+      assert.equal(gateway.createCalls, 0);
+      assert.equal(gateway.activeTransitions, 0);
+      assert.equal(gateway.getCalls, 0);
+      assert.equal(gateway.issue.title, "Existing unclassified issue");
+      assert.deepEqual(gateway.issue.labels, ["security"]);
+    } finally {
+      await stopTestServer(running, assetDirectory);
     }
   });
 });
@@ -296,6 +388,79 @@ describe("local API security and validation", () => {
       assert.equal(repaired.task.state, "CLOSED");
       assert.equal(repaired.task.status, "DONE");
       assert.equal(gateway.createCalls, 1);
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+
+  test("returns a non-retryable recovery flow for an ambiguous create result", async () => {
+    const gateway = new FakeBoardGateway();
+    gateway.failAmbiguousCreate = true;
+    const { running, assetDirectory } = await startTestServer(gateway);
+    try {
+      const response = await fetch(`${running.url}/api/issues`, {
+        method: "POST",
+        headers: mutationHeaders(running),
+        body: JSON.stringify({ title: "Possibly created", status: "backlog" }),
+      });
+      assert.equal(response.status, 502);
+      const payload = await response.json() as {
+        error: { retryable: boolean; message: string };
+        recovery: { kind: string; title: string; issuesUrl: string };
+      };
+      assert.equal(payload.error.retryable, false);
+      assert.match(payload.error.message, /Do not retry yet/);
+      assert.deepEqual(payload.recovery, {
+        kind: "ambiguous-create",
+        title: "[BACKLOG] Possibly created",
+        issuesUrl: "https://github.com/acme/example/issues",
+      });
+      assert.equal(gateway.createCalls, 1);
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+
+  test("classifies an existing unclassified issue only after an explicit transition", async () => {
+    const gateway = new FakeBoardGateway();
+    gateway.issue = {
+      ...gateway.issue,
+      title: "Existing issue",
+      state: "CLOSED",
+      labels: ["security", "needs-triage"],
+    };
+    const { running, assetDirectory } = await startTestServer(gateway);
+    try {
+      const before = await fetch(`${running.url}/api/board?state=closed`);
+      const beforePayload = await before.json() as { tasks: Array<{ status: null }> };
+      assert.equal(beforePayload.tasks[0]?.status, null);
+      assert.equal(gateway.issue.title, "Existing issue");
+
+      const response = await fetch(`${running.url}/api/issues/12/status`, {
+        method: "POST",
+        headers: mutationHeaders(running),
+        body: JSON.stringify({ status: "in-progress" }),
+      });
+      assert.equal(response.status, 200);
+      const payload = await response.json() as {
+        task: { status: string; state: string; fullTitle: string; labels: string[] };
+      };
+      assert.deepEqual(payload.task, {
+        number: 12,
+        status: "IN PROGRESS",
+        title: "Existing issue",
+        fullTitle: "[IN PROGRESS] Existing issue",
+        body: "Keep GitHub credentials on the local server.",
+        state: "OPEN",
+        labels: ["security", "needs-triage"],
+        assignees: ["octocat"],
+        url: "https://github.com/acme/example/issues/12",
+      });
+      assert.deepEqual(gateway.issue.labels, [
+        "security",
+        "needs-triage",
+        "status:in-progress",
+      ]);
     } finally {
       await stopTestServer(running, assetDirectory);
     }

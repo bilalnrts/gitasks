@@ -32,6 +32,14 @@
         <input id="search-input" type="search" placeholder="Search title or #issue" autocomplete="off">
       </label>
       <div class="toolbar-actions">
+        <label class="state-filter" for="state-filter">
+          <span>GitHub state</span>
+          <select id="state-filter">
+            <option value="open" selected>Open</option>
+            <option value="closed">Closed</option>
+            <option value="all">All</option>
+          </select>
+        </label>
         <button id="refresh-button" class="button secondary" type="button">
           <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M15.7 6.2A6.5 6.5 0 1 0 16 13l-1.6-.8a4.7 4.7 0 1 1-.2-4.8h-2.5V5.7h5.5v5.5h-1.7V7.6l.2-1.4Z"/></svg>
           Refresh
@@ -66,6 +74,16 @@
       <section id="search-empty" class="state-panel" hidden>
         <strong>No matching tasks</strong>
         <p>Try a different title or issue number.</p>
+      </section>
+      <section id="unclassified-panel" class="unclassified-panel" aria-labelledby="unclassified-title" hidden>
+        <header class="unclassified-header">
+          <div>
+            <h2 id="unclassified-title">Unclassified issues</h2>
+            <p>No recognized Gitasks status label or title prefix. Assigning a status updates GitHub.</p>
+          </div>
+          <span id="unclassified-count" class="count">0</span>
+        </header>
+        <div id="unclassified-list" class="unclassified-list"></div>
       </section>
       <div id="board" class="board" tabindex="0" aria-label="Gitasks status board" aria-describedby="board-scroll-hint" hidden></div>
     </main>

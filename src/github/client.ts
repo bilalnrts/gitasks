@@ -4,9 +4,16 @@ import type {
   IssueTransition,
   TaskGateway,
   TaskIssue,
+  IssueStateFilter,
 } from "../tasks/types.js";
+import {
+  AmbiguousCreateError,
+  CommandError,
+  errorMessage,
+  PartialCreateError,
+  UserError,
+} from "../utils/errors.js";
 import type { CommandRunner } from "../utils/exec.js";
-import { errorMessage, PartialCreateError, UserError } from "../utils/errors.js";
 
 interface GitHubIssueJson {
   number: number;
@@ -109,7 +116,7 @@ export class GitHubClient implements TaskGateway {
     return created;
   }
 
-  async listIssues(state: "open" | "all"): Promise<TaskIssue[]> {
+  async listIssues(state: IssueStateFilter): Promise<TaskIssue[]> {
     const pages = await this.runJson<GitHubIssueJson[][]>(
       [
         "api",
@@ -124,7 +131,7 @@ export class GitHubClient implements TaskGateway {
       .filter(
         (issue) =>
           issue.pull_request === undefined &&
-          (state === "all" || issue.state.toLowerCase() === "open"),
+          (state === "all" || issue.state.toLowerCase() === state),
       )
       .map(toTaskIssue);
   }
@@ -141,21 +148,50 @@ export class GitHubClient implements TaskGateway {
   }
 
   async createIssue(options: CreateIssueInput): Promise<TaskIssue> {
-    const issue = await this.runJson<GitHubIssueJson>(
-      [
-        "api",
-        "--method",
-        "POST",
-        `repos/${this.repository}/issues`,
-        "--raw-field",
-        `title=${options.title}`,
-        "--raw-field",
-        `body=${options.body}`,
-        "--raw-field",
-        `labels[]=${options.label}`,
-      ],
-      "Could not create the GitHub issue.",
-    );
+    const args = [
+      "api",
+      "--method",
+      "POST",
+      `repos/${this.repository}/issues`,
+      "--raw-field",
+      `title=${options.title}`,
+      "--raw-field",
+      `body=${options.body}`,
+      "--raw-field",
+      `labels[]=${options.label}`,
+    ];
+    let stdout: string;
+    try {
+      stdout = (await this.runner("gh", args)).stdout;
+    } catch (error) {
+      const detail = errorMessage(error);
+      const definitelyNotCreated =
+        (error instanceof CommandError && error.causeCode === "ENOENT") ||
+        /\bHTTP\s+4\d\d\b|\b(400|401|403|404|409|410|422|429)\b/.test(detail);
+      if (definitelyNotCreated) {
+        throw new UserError(`Could not create the GitHub issue.\n\n${detail}`);
+      }
+      throw this.ambiguousCreateError(options.title, detail);
+    }
+
+    let issue: GitHubIssueJson;
+    try {
+      const candidate = JSON.parse(stdout) as Partial<GitHubIssueJson>;
+      if (
+        !Number.isSafeInteger(candidate.number) ||
+        typeof candidate.title !== "string" ||
+        typeof candidate.state !== "string" ||
+        !Array.isArray(candidate.labels)
+      ) {
+        throw new Error("Invalid issue response.");
+      }
+      issue = candidate as GitHubIssueJson;
+    } catch {
+      throw this.ambiguousCreateError(
+        options.title,
+        "GitHub CLI returned an unexpected response.",
+      );
+    }
     if (options.state === "open") {
       return toTaskIssue(issue);
     }
@@ -176,6 +212,15 @@ export class GitHubClient implements TaskGateway {
     } catch (error) {
       throw new PartialCreateError(errorMessage(error), toTaskIssue(issue));
     }
+  }
+
+  private ambiguousCreateError(title: string, detail: string): AmbiguousCreateError {
+    const recoveryUrl = `https://github.com/${this.repository}/issues`;
+    return new AmbiguousCreateError(
+      `Could not confirm whether GitHub created "${title}". Do not retry yet: run \`gitasks list --state all\` or open ${recoveryUrl} and search for the exact title. Reuse it if found; retry only after confirming it does not exist.\n\n${detail}`,
+      title,
+      recoveryUrl,
+    );
   }
 
   async transitionIssue(

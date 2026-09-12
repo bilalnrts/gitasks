@@ -6,18 +6,29 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createTaskIssue, transitionTask } from "../tasks/service.js";
+import {
+  createTaskIssue,
+  normalizeIssueStateFilter,
+  transitionTask,
+} from "../tasks/service.js";
 import {
   STATUS_DEFINITIONS,
   normalizeStatus,
   type TaskStatus,
 } from "../tasks/statuses.js";
 import type {
+  CreateIssueInput,
+  IssueStateFilter,
   TaskCreator,
   TaskGateway,
   TaskIssue,
 } from "../tasks/types.js";
-import { errorMessage, PartialCreateError, UserError } from "../utils/errors.js";
+import {
+  AmbiguousCreateError,
+  errorMessage,
+  PartialCreateError,
+  UserError,
+} from "../utils/errors.js";
 import { presentTask } from "./presenter.js";
 
 export const DEFAULT_UI_PORT = 4317;
@@ -26,7 +37,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 const CSRF_PLACEHOLDER = "__GITASKS_CSRF_TOKEN__";
 
 export interface BoardGateway extends TaskGateway, TaskCreator {
-  listIssues(state: "open" | "all"): Promise<TaskIssue[]>;
+  listIssues(state: IssueStateFilter): Promise<TaskIssue[]>;
 }
 
 export interface UiServerOptions {
@@ -265,10 +276,16 @@ function parseStatusInput(input: Record<string, unknown>): TaskStatus {
   }
 }
 
-function boardPayload(repository: string, issues: TaskIssue[]) {
+function boardPayload(
+  repository: string,
+  state: IssueStateFilter,
+  issues: TaskIssue[],
+) {
   return {
     repository,
-    scope: "All GitHub Issues (open and closed); pull requests excluded",
+    state,
+    scope: `${state === "all" ? "Open and closed" : state === "open" ? "Open" : "Closed"} GitHub Issues; search covers every loaded issue; pull requests excluded`,
+    complete: true,
     statuses: STATUS_DEFINITIONS.map(({ name, slug, color }) => ({ name, slug, color })),
     tasks: issues.map(presentTask),
   };
@@ -281,7 +298,10 @@ function createRequestHandler(
   getAuthority: () => string,
 ) {
   const transitionTails = new Map<number, Promise<void>>();
-  const enqueueTransition = <T>(issueNumber: number, action: () => Promise<T>): Promise<T> => {
+  const enqueueStatusTransition = <T>(
+    issueNumber: number,
+    action: () => Promise<T>,
+  ): Promise<T> => {
     const previous = transitionTails.get(issueNumber) ?? Promise.resolve();
     const result = previous.then(action);
     const tail = result.then(
@@ -303,8 +323,14 @@ function createRequestHandler(
       const path = requestUrl.pathname;
 
       if (request.method === "GET" && path === "/api/board") {
-        const issues = await options.gateway.listIssues("all");
-        sendJson(response, 200, boardPayload(options.repository, issues));
+        let state: IssueStateFilter;
+        try {
+          state = normalizeIssueStateFilter(requestUrl.searchParams.get("state") ?? "open");
+        } catch (error) {
+          throw new HttpError(400, errorMessage(error));
+        }
+        const issues = await options.gateway.listIssues(state);
+        sendJson(response, 200, boardPayload(options.repository, state, issues));
         return;
       }
 
@@ -330,6 +356,15 @@ function createRequestHandler(
               task: presentTask(error.issue),
               repair: { issueNumber: error.issue.number, status: "DONE" },
             });
+          } else if (error instanceof AmbiguousCreateError) {
+            sendJson(response, 502, {
+              error: { message: error.message, retryable: false },
+              recovery: {
+                kind: "ambiguous-create",
+                title: error.title,
+                issuesUrl: error.recoveryUrl,
+              },
+            });
           } else {
             sendJson(response, 502, {
               error: { message: errorMessage(error), retryable: true },
@@ -343,7 +378,7 @@ function createRequestHandler(
       if (request.method === "POST" && transitionMatch?.[1] !== undefined) {
         const issueNumber = Number(transitionMatch[1]);
         const status = parseStatusInput(await readJsonBody(request));
-        await enqueueTransition(issueNumber, async () => {
+        await enqueueStatusTransition(issueNumber, async () => {
           try {
             const issue = await transitionTask(options.gateway, String(issueNumber), status);
             sendJson(response, 200, { task: presentTask(issue) });

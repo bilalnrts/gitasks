@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -25,6 +25,10 @@ import type {
   TaskGateway,
   TaskIssue,
 } from "../src/tasks/types.js";
+import {
+  AmbiguousCreateError,
+  CommandError,
+} from "../src/utils/errors.js";
 import type { CommandRunner } from "../src/utils/exec.js";
 
 class FakeGateway implements TaskGateway {
@@ -120,13 +124,13 @@ describe("task status protocol", () => {
     );
   });
 
-  test("prefers one canonical label, then title, then BACKLOG", () => {
+  test("prefers a canonical label, then title, and leaves unknown issues unclassified", () => {
     assert.equal(
       inferTaskStatus(["priority:high", "status:review"], "[TODO] Work"),
       "REVIEW",
     );
     assert.equal(inferTaskStatus([], "[TODO] Work"), "TODO");
-    assert.equal(inferTaskStatus([], "Manual issue"), "BACKLOG");
+    assert.equal(inferTaskStatus([], "Manual issue"), undefined);
   });
 
   test("resolves conflicting status labels deterministically", () => {
@@ -171,6 +175,25 @@ describe("task transitions", () => {
       previousStatusLabels: ["status:done", "STATUS:legacy"],
       nextStatusLabel: "status:in-progress",
     });
+  });
+
+  test("explicitly classifies an unclassified issue without losing unrelated labels", async () => {
+    const gateway = new FakeGateway({
+      number: 43,
+      title: "Existing repository issue",
+      state: "CLOSED",
+      labels: ["bug", "needs-triage"],
+      url: "https://github.com/acme/example/issues/43",
+      body: "",
+      assignees: [],
+    });
+
+    const updated = await transitionTask(gateway, "43", "TODO");
+
+    assert.equal(updated.title, "[TODO] Existing repository issue");
+    assert.equal(updated.state, "OPEN");
+    assert.deepEqual(updated.labels, ["bug", "needs-triage", "status:todo"]);
+    assert.deepEqual(gateway.transition?.previousStatusLabels, []);
   });
 
   test("DONE closes the issue", async () => {
@@ -300,10 +323,10 @@ describe("issue listing", () => {
     );
   });
 
-  test("explicit filters include manually closed issues", async () => {
-    let requestedState: "open" | "all" | undefined;
+  test("filters status and GitHub state independently", async () => {
+    let requestedState: "open" | "closed" | "all" | undefined;
     const client = {
-      async listIssues(state: "open" | "all"): Promise<TaskIssue[]> {
+      async listIssues(state: "open" | "closed" | "all"): Promise<TaskIssue[]> {
         requestedState = state;
         return [{
           number: 4,
@@ -317,21 +340,89 @@ describe("issue listing", () => {
       },
     };
 
-    const output = await listTasks(client, { status: "todo" });
+    const output = await listTasks(client, { status: "todo", state: "closed" });
 
-    assert.equal(requestedState, "all");
-    assert.match(output, /#4\s+\[TODO\]\s+Closed manually/);
+    assert.equal(requestedState, "closed");
+    assert.match(output, /#4\s+\[TODO\]\s+\[CLOSED\]\s+Closed manually/);
+  });
+
+  test("lists unclassified open issues without changing them", async () => {
+    const issue: TaskIssue = {
+      number: 8,
+      title: "Existing issue",
+      state: "OPEN",
+      labels: ["bug"],
+      url: "https://github.com/acme/example/issues/8",
+      body: "",
+      assignees: [],
+    };
+    let requestedState: string | undefined;
+    const output = await listTasks({
+      async listIssues(state) {
+        requestedState = state;
+        return [issue];
+      },
+    }, { status: "unclassified" });
+
+    assert.equal(requestedState, "open");
+    assert.match(output, /#8\s+\[UNCLASSIFIED\]\s+\[OPEN\]\s+Existing issue/);
+    assert.deepEqual(issue, {
+      number: 8,
+      title: "Existing issue",
+      state: "OPEN",
+      labels: ["bug"],
+      url: "https://github.com/acme/example/issues/8",
+      body: "",
+      assignees: [],
+    });
+  });
+});
+
+describe("ambiguous issue creation", () => {
+  test("does not disguise an unconfirmed create response as safely retryable", async () => {
+    let createCalls = 0;
+    const runner: CommandRunner = async () => {
+      createCalls += 1;
+      throw new CommandError({
+        command: "gh api",
+        exitCode: 1,
+        stdout: "",
+        stderr: "connection reset after request upload",
+      });
+    };
+    const client = new GitHubClient("acme/example", runner);
+
+    await assert.rejects(
+      () => client.createIssue({
+        title: "[BACKLOG] Possibly created",
+        body: "",
+        state: "open",
+        label: "status:backlog",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof AmbiguousCreateError);
+        assert.match(error.message, /Do not retry yet/);
+        assert.match(error.message, /gitasks list --state all/);
+        return true;
+      },
+    );
+    assert.equal(createCalls, 1);
   });
 });
 
 describe("repository initialization", () => {
-  test("preserves an existing AGENTS.md and inserts Gitasks once", async () => {
+  test("preserves existing AGENTS.md and protocol content across repeated init", async () => {
     const directory = await mkdtemp(join(tmpdir(), "gitasks-init-"));
     try {
       const agentsPath = join(directory, "AGENTS.md");
+      const protocolPath = join(directory, ".gitasks", "protocol.md");
+      await mkdir(join(directory, ".gitasks"), { recursive: true });
       await writeFile(agentsPath, "# Existing agent rules\n\nKeep this text.\n", "utf8");
+      await writeFile(protocolPath, "# Custom protocol\n\nKeep this workflow.\n", "utf8");
+      let labelChecks = 0;
       const client = {
         async ensureStatusLabels(): Promise<string[]> {
+          labelChecks += 1;
           return [];
         },
       };
@@ -342,13 +433,14 @@ describe("repository initialization", () => {
       const second = await readFile(agentsPath, "utf8");
 
       assert.match(first, /^# Existing agent rules/m);
-      assert.match(first, /Keep this text\./);
+      assert.match(first, /search existing issues for the same work/);
       assert.equal(first.match(/<!-- gitasks:start -->/g)?.length, 1);
       assert.equal(second, first);
-      assert.match(
-        await readFile(join(directory, ".gitasks", "protocol.md"), "utf8"),
-        /GitHub Issues are this repository's task management source of truth/,
+      assert.equal(
+        await readFile(protocolPath, "utf8"),
+        "# Custom protocol\n\nKeep this workflow.\n",
       );
+      assert.equal(labelChecks, 2);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

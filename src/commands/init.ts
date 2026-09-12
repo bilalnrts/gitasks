@@ -14,6 +14,7 @@ GitHub Issues are this repository's task management source of truth. Do not crea
 ## Rules
 
 - Every development task should have a GitHub Issue.
+- Before opening a new issue, search existing issues for the same work and reuse a suitable issue when one exists.
 - Issue titles and labels must follow the Gitasks status protocol.
 - Before starting a task, run \`gitasks start <issue-number>\` to move it to \`IN PROGRESS\`.
 - When implementation is complete and ready for review, run \`gitasks review <issue-number>\`.
@@ -22,7 +23,8 @@ GitHub Issues are this repository's task management source of truth. Do not crea
 - Do not silently change issue status outside this protocol.
 - Preserve unrelated issue labels during status changes.
 - If an issue has conflicting status labels, its matching title prefix wins; otherwise Gitasks uses the first status in protocol order.
-- A filtered list searches open and closed issues. The default unfiltered list shows only active open work.
+- Issues without a recognized status label or title prefix are unclassified; assign a status explicitly before starting them.
+- GitHub open/closed state is separate from task status. Lists default to open issues; use \`--state closed\` or \`--state all\` to change scope.
 
 ## Statuses
 
@@ -34,6 +36,8 @@ Use \`BLOCKED\` when work cannot continue. A blocked task may return to any acti
 
 \`\`\`bash
 gitasks list
+gitasks list --status unclassified
+gitasks list --state all
 gitasks create "Describe the task"
 gitasks todo 42
 gitasks start 42
@@ -53,10 +57,10 @@ This repository uses GitHub Issues as its task management source of truth.
 
 Before starting development work:
 
-1. Run \`gitasks list\`.
-2. Identify the relevant task.
-3. Run \`gitasks start <issue-number>\`.
-4. Read \`.gitasks/protocol.md\`.
+1. Read \`.gitasks/protocol.md\`.
+2. Run \`gitasks list\` and search existing issues for the same work.
+3. Reuse the relevant issue, or create one only when none exists.
+4. Run \`gitasks start <issue-number>\`.
 
 When implementation is ready for review, run:
 

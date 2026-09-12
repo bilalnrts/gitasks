@@ -20,6 +20,18 @@ export class PartialCreateError extends UserError {
   }
 }
 
+export class AmbiguousCreateError extends UserError {
+  readonly title: string;
+  readonly recoveryUrl: string;
+
+  constructor(message: string, title: string, recoveryUrl: string) {
+    super(message);
+    this.name = "AmbiguousCreateError";
+    this.title = title;
+    this.recoveryUrl = recoveryUrl;
+  }
+}
+
 export class CommandError extends Error {
   readonly command: string;
   readonly exitCode: number | null;

@@ -11,7 +11,7 @@ import { createGitHubContext, type GitHubContext } from "./github/context.js";
 import type { TaskStatus } from "./tasks/statuses.js";
 import { errorMessage, UserError } from "./utils/errors.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 function print(message: string): void {
   process.stdout.write(`${message}\n`);
@@ -56,9 +56,14 @@ function listCommand(program: Command): void {
     .description("List GitHub Issues as Gitasks tasks")
     .option(
       "-s, --status <status>",
-      "filter by backlog, todo, in-progress, review, done, or blocked",
+      "filter by backlog, todo, in-progress, review, done, blocked, or unclassified",
     )
-    .action(async (options: { status?: string }) => {
+    .option(
+      "--state <state>",
+      "GitHub issue state: open, closed, or all",
+      "open",
+    )
+    .action(async (options: { status?: string; state: string }) => {
       print(await withClient(({ client }) => listTasks(client, options)));
     });
 }

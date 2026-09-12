@@ -6,7 +6,7 @@ interface StatusDefinition {
 
 interface BoardTask {
   number: number;
-  status: string;
+  status: string | null;
   title: string;
   fullTitle: string;
   body: string;
@@ -18,7 +18,9 @@ interface BoardTask {
 
 interface BoardPayload {
   repository: string;
+  state: "open" | "closed" | "all";
   scope: string;
+  complete: boolean;
   statuses: StatusDefinition[];
   tasks: BoardTask[];
 }
@@ -33,6 +35,11 @@ interface ErrorPayload {
   repair?: {
     issueNumber: number;
     status: string;
+  };
+  recovery?: {
+    kind: "ambiguous-create";
+    title: string;
+    issuesUrl: string;
   };
 }
 
@@ -66,7 +73,11 @@ const searchEmpty = element<HTMLElement>("search-empty");
 const repositoryText = element<HTMLElement>("repository");
 const scopeText = element<HTMLElement>("scope-text");
 const statusMessage = element<HTMLElement>("status-message");
+const stateFilter = element<HTMLSelectElement>("state-filter");
 const refreshTime = element<HTMLTimeElement>("refresh-time");
+const unclassifiedPanel = element<HTMLElement>("unclassified-panel");
+const unclassifiedList = element<HTMLElement>("unclassified-list");
+const unclassifiedCount = element<HTMLElement>("unclassified-count");
 const refreshButton = element<HTMLButtonElement>("refresh-button");
 const searchInput = element<HTMLInputElement>("search-input");
 const connectionError = element<HTMLElement>("connection-error");
@@ -83,10 +94,12 @@ const detailContent = element<HTMLElement>("detail-content");
 const toast = element<HTMLElement>("toast");
 const toastMessage = element<HTMLElement>("toast-message");
 const toastRetry = element<HTMLButtonElement>("toast-retry");
+const toastTitle = element<HTMLElement>("toast-title");
 
 let statuses: StatusDefinition[] = [];
 let tasks: BoardTask[] = [];
 let scope = "";
+let stateScope: "open" | "closed" | "all" = "open";
 let selectedIssue: number | undefined;
 const pendingIssues = new Set<number>();
 let retryAction: (() => void) | undefined;
@@ -125,18 +138,27 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
-function makeStatusOptions(selected: string): HTMLOptionElement[] {
-  return statuses.map((status) => {
+function makeStatusOptions(selected: string | null): HTMLOptionElement[] {
+  const options = statuses.map((status) => {
     const option = document.createElement("option");
     option.value = status.name;
     option.textContent = status.name;
     option.selected = status.name === selected;
     return option;
   });
+  if (selected === null) {
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Assign status…";
+    placeholder.selected = true;
+    placeholder.disabled = true;
+    options.unshift(placeholder);
+  }
+  return options;
 }
 
-function statusColor(statusName: string): string {
-  return `#${statuses.find(({ name }) => name === statusName)?.color ?? "98A2B3"}`;
+function statusColor(statusName: string | null): string {
+  return `#${statuses.find(({ name }) => name === statusName)?.color ?? "667085"}`;
 }
 
 function upsertTask(task: BoardTask): void {
@@ -149,11 +171,23 @@ function upsertTask(task: BoardTask): void {
 }
 
 function showError(message: string, retry?: () => void): void {
+  toast.classList.remove("success");
+  toastTitle.textContent = "Action failed";
   toastMessage.textContent = message;
   retryAction = retry;
   toastRetry.hidden = retry === undefined;
   const host = detailDialog.open ? detailDialog : createDialog.open ? createDialog : document.body;
   host.append(toast);
+  toast.hidden = false;
+}
+
+function showSuccess(message: string): void {
+  toast.classList.add("success");
+  toastTitle.textContent = "Success";
+  toastMessage.textContent = message;
+  retryAction = undefined;
+  toastRetry.hidden = true;
+  document.body.append(toast);
   toast.hidden = false;
 }
 
@@ -178,7 +212,7 @@ function createLabelList(labels: string[]): HTMLElement {
 }
 
 function setIssuePending(issueNumber: number, pending: boolean): void {
-  const card = board.querySelector<HTMLElement>(`[data-issue="${issueNumber}"]`);
+  const card = document.querySelector<HTMLElement>(`[data-issue="${issueNumber}"]`);
   card?.classList.toggle("is-pending", pending);
   for (const control of card?.querySelectorAll<HTMLButtonElement | HTMLSelectElement>("button, select") ?? []) {
     control.disabled = pending;
@@ -250,12 +284,17 @@ function createTaskCard(task: BoardTask): HTMLElement {
 }
 
 function filteredTasks(): BoardTask[] {
+  const stateTasks = tasks.filter(
+    (task) =>
+      stateScope === "all" ||
+      task.state.toLowerCase() === stateScope,
+  );
   const query = searchInput.value.trim().toLowerCase();
   if (query.length === 0) {
-    return tasks;
+    return stateTasks;
   }
   const issueQuery = query.startsWith("#") ? query.slice(1) : query;
-  return tasks.filter(
+  return stateTasks.filter(
     (task) =>
       task.title.toLowerCase().includes(query) ||
       task.fullTitle.toLowerCase().includes(query) ||
@@ -303,9 +342,21 @@ function renderBoard(): void {
     column.append(header, list);
     board.append(column);
   }
+  const unclassifiedTasks = visibleTasks.filter((task) => task.status === null);
+  unclassifiedCount.textContent = String(unclassifiedTasks.length);
+  unclassifiedList.replaceChildren();
+  if (unclassifiedTasks.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "column-empty";
+    empty.textContent = searchInput.value.trim() ? "No matches" : "No unclassified issues";
+    unclassifiedList.append(empty);
+  } else {
+    unclassifiedList.append(...unclassifiedTasks.map(createTaskCard));
+  }
+  unclassifiedPanel.hidden = false;
 
   searchEmpty.hidden = searchInput.value.trim().length === 0 || visibleTasks.length > 0;
-  scopeText.textContent = `${scope} · ${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
+  scopeText.textContent = `${scope} · ${tasks.length} issue${tasks.length === 1 ? "" : "s"}`;
 }
 
 function renderDetail(task: BoardTask): void {
@@ -319,7 +370,7 @@ function renderDetail(task: BoardTask): void {
   overviewTitle.textContent = "Overview";
   overview.append(overviewTitle);
   const rows: Array<[string, string]> = [
-    ["Task status", task.status],
+    ["Task status", task.status ?? "Unclassified"],
     ["GitHub state", task.state],
     ["Assignee", task.assignees.length > 0 ? task.assignees.map((name) => `@${name}`).join(", ") : "Unassigned"],
   ];
@@ -432,26 +483,37 @@ async function changeStatus(issueNumber: number, status: string): Promise<void> 
         detailContent.querySelector<HTMLSelectElement>("#detail-status-select")?.focus();
       }
     } else {
-      board.querySelector<HTMLButtonElement>(`[data-issue="${issueNumber}"] .card-title-button`)?.focus();
+      document.querySelector<HTMLButtonElement>(`[data-issue="${issueNumber}"] .card-title-button`)?.focus();
     }
     if (succeeded) {
       statusMessage.textContent = `Issue #${issueNumber} moved to ${status}.`;
+      const current = tasks.find(({ number }) => number === issueNumber);
+      if (status === "DONE" && current?.state === "CLOSED" && stateScope === "open") {
+        showSuccess(`Issue #${issueNumber} moved to DONE and closed. It is hidden by the Open filter.`);
+      }
     }
   }
 }
 
 async function loadBoard(): Promise<void> {
   refreshButton.disabled = true;
+  stateFilter.disabled = true;
   connectionError.hidden = true;
   if (tasks.length === 0) {
     loadingState.hidden = false;
     board.hidden = true;
+    unclassifiedPanel.hidden = true;
   }
   try {
-    const payload = await apiRequest<BoardPayload>("/api/board");
+    const requestedState = stateFilter.value;
+    const payload = await apiRequest<BoardPayload>(
+      `/api/board?state=${encodeURIComponent(requestedState)}`,
+    );
     statuses = payload.statuses;
     tasks = payload.tasks;
     scope = payload.scope;
+    stateScope = payload.state;
+    stateFilter.value = payload.state;
     repositoryText.textContent = payload.repository;
     const refreshed = new Date();
     refreshTime.dateTime = refreshed.toISOString();
@@ -464,11 +526,13 @@ async function loadBoard(): Promise<void> {
     loadingState.hidden = true;
     if (tasks.length === 0) {
       board.hidden = true;
+      unclassifiedPanel.hidden = true;
     }
     connectionErrorMessage.textContent = error instanceof Error ? error.message : "Could not read GitHub Issues.";
     connectionError.hidden = false;
   } finally {
     refreshButton.disabled = false;
+    stateFilter.disabled = false;
   }
 }
 
@@ -514,9 +578,12 @@ async function submitCreate(): Promise<void> {
     } else {
       createError.textContent = message;
       createError.hidden = false;
-      showError(message, () => {
+      const retryable =
+        !(error instanceof ApiRequestError) ||
+        error.payload.error?.retryable !== false;
+      showError(message, retryable ? () => {
         void submitCreate();
-      });
+      } : undefined);
     }
   } finally {
     createSubmit.disabled = false;
@@ -525,6 +592,9 @@ async function submitCreate(): Promise<void> {
 }
 
 refreshButton.addEventListener("click", () => {
+  void loadBoard();
+});
+stateFilter.addEventListener("change", () => {
   void loadBoard();
 });
 element<HTMLButtonElement>("connection-retry").addEventListener("click", () => {

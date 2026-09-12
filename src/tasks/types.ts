@@ -1,3 +1,5 @@
+export type IssueStateFilter = "open" | "closed" | "all";
+
 export interface TaskIssue {
   number: number;
   title: string;

@@ -1,6 +1,6 @@
 import { formatTaskTitle, inferTaskStatus, stripTaskStatusPrefixes } from "./parser.js";
 import { isStatusLabel, normalizeStatus, statusLabel, type TaskStatus } from "./statuses.js";
-import type { TaskCreator, TaskGateway, TaskIssue } from "./types.js";
+import type { IssueStateFilter, TaskCreator, TaskGateway, TaskIssue } from "./types.js";
 import { UserError } from "../utils/errors.js";
 
 export function parseIssueNumber(value: string): number {
@@ -17,8 +17,18 @@ export function taskTitle(issue: TaskIssue): string {
   return stripTaskStatusPrefixes(issue.title);
 }
 
-export function taskStatus(issue: TaskIssue): TaskStatus {
+export function taskStatus(issue: TaskIssue): TaskStatus | undefined {
   return inferTaskStatus(issue.labels, issue.title);
+}
+
+export function normalizeIssueStateFilter(value: string): IssueStateFilter {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "open" || normalized === "closed" || normalized === "all") {
+    return normalized;
+  }
+  throw new UserError(
+    `Invalid issue state: ${value}\n\nValid states:\n- open\n- closed\n- all`,
+  );
 }
 
 export interface CreateTaskOptions {
