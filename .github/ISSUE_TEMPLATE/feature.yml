@@ -1,0 +1,60 @@
+name: Feature request
+description: Propose a focused Gitasks capability or improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub Issues are the canonical roadmap. Search existing issues before proposing new work. Describe the problem rather than prescribing a framework or hosted service.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched open and closed issues for the same proposal.
+          required: true
+        - label: I understand that filing an issue does not assign it to a release.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult or impossible, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior and important empty, permission, partial, or failure states.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Primary surface
+      options:
+        - CLI and protocol
+        - Overview
+        - Tasks
+        - Activity
+        - Pull Requests
+        - Milestones
+        - Build, packaging, or contributor workflow
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and alternatives
+      description: Note compatibility, accessibility, security, GitHub API, or permission considerations and alternatives already tried.
+  - type: checkboxes
+    id: architecture
+    attributes:
+      label: Project boundaries
+      options:
+        - label: The proposal keeps GitHub canonical and accounts for the local, `gh`-authenticated architecture, or explains why that boundary should be reconsidered.
+          required: true

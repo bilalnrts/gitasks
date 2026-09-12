@@ -1,8 +1,8 @@
 # Gitasks
 
-A lightweight local task protocol for humans and coding agents, powered entirely by GitHub Issues.
+Gitasks is a local workspace and task protocol for humans and coding agents, powered entirely by GitHub Issues. GitHub remains the source of truth: Gitasks has no local task database, hosted backend, SaaS account, or browser credential store.
 
-Gitasks is a small, development-only CLI. GitHub Issues remain the single source of truth: there is no local task database, hosted backend, SaaS account, or additional credential store.
+![Gitasks 0.4 workspace](https://raw.githubusercontent.com/bilalnrts/gitasks/main/.github/assets/gitasks-workspace.png)
 
 ## Requirements
 
@@ -11,22 +11,32 @@ Gitasks is a small, development-only CLI. GitHub Issues remain the single source
 - [GitHub CLI](https://cli.github.com/) (`gh`)
 - A repository whose `origin` points to `github.com`
 
-Authenticate once with GitHub CLI:
+Authenticate with the GitHub CLI before using Gitasks:
 
 ```bash
 gh auth login
+gh auth status
 ```
 
-Gitasks uses that existing authentication. It never asks for or stores a personal access token.
+Gitasks uses the active `gh` authentication and never asks the browser for a token.
 
-## Installation
+## Install and initialize 0.4
+
+Install the exact 0.4 release in a repository:
 
 ```bash
-npm install -D gitasks
+npm install --save-dev gitasks@0.4.0
 npx gitasks init
+npx gitasks ui
 ```
 
-`gitasks init` detects the current GitHub repository, verifies `gh` authentication, creates missing `status:*` labels, and adds the following files without replacing existing content or modifying issues:
+The workspace opens at `http://127.0.0.1:4317`. To select another port:
+
+```bash
+npx gitasks ui --port 4400
+```
+
+`gitasks init` detects the current GitHub repository, verifies `gh` authentication, creates any missing `status:*` labels, and creates missing protocol files:
 
 ```text
 .gitasks/
@@ -35,34 +45,33 @@ npx gitasks init
 AGENTS.md
 ```
 
-If `AGENTS.md` already exists, Gitasks appends a clearly marked task-management section. An existing `.gitasks/protocol.md` is never replaced. Re-running `init` is safe.
+Initialization does not modify issues. An existing `.gitasks/protocol.md` is never replaced. If `AGENTS.md` already contains the `gitasks:start` marker, it is left unchanged; otherwise Gitasks appends its marked section and preserves all existing content. Re-running `init` is safe for consumer customizations.
 
-## Local task board
+## Workspace
 
-Start the lightweight local board from anywhere inside the target Git repository:
+The 0.4 workspace has five routes in a persistent sidebar. Each route can be opened directly and revisited with browser Back and Forward.
 
-```bash
-npx gitasks ui
-```
+- **Overview** — repository-scoped operational summaries, assigned work, upcoming milestones, and recent updates. An unavailable section is shown as unavailable rather than as a zero.
+- **Tasks** — board and list views over the same filtered data. Filter by GitHub state, one or more Gitasks statuses (including Unclassified), assignee, milestone, labels, or search; choose deterministic sorting. The board keeps the six workflow columns and displays unclassified issues separately.
+- **Activity** — real repository issue and timeline activity with actor/event filters, an explicit coverage note, and manual pagination.
+- **Pull Requests** — browse and manage pull requests, details, reviewers, reviews, checks, files, draft state, assignments, milestones, and guarded merges according to GitHub permissions and repository settings.
+- **Milestones** — browse, create, edit, close, and reopen milestones; inspect linked work and GitHub's issue-and-pull-request progress counts.
 
-The default address is `http://127.0.0.1:4317`. Choose another port when needed:
+Task moves are available through an accessible **Move to** menu in board, list, and detail views. Board cards also support pointer drag from their dedicated handle and touch long-press. Unclassified is not a drop target. A move to the current column or outside a valid target makes no request.
 
-```bash
-npx gitasks ui --port 4400
-```
+All pages provide explicit loading, empty, filtered-empty, partial, permission or unsupported, pending, error, and retry states where applicable. Data is refreshed explicitly; Gitasks does not poll and does not use WebSockets.
 
-The board keeps the six Gitasks status columns and shows issues without a recognized status in a separate **Unclassified issues** section. Its **Open / Closed / All** filter defaults to **Open**; GitHub issue state remains independent from task status, so a manually closed `IN PROGRESS` issue stays `IN PROGRESS` under **Closed** or **All**. Search covers every issue loaded for the selected state scope. All pages are fetched, so the board does not silently truncate results. Pull requests are excluded.
+Stop the local server with `Ctrl+C`.
 
-The server listens only on `127.0.0.1`, validates the request host and origin, and requires a per-process CSRF token for mutations. Stop it with `Ctrl+C`.
-
-Current limitations: one repository per server process, manual refresh only, no drag-and-drop, no comments or PR management, and no offline mode.
-
-## Commands
+## CLI commands
 
 ```bash
-gitasks list
+gitasks --version
+gitasks --help
+gitasks init
 gitasks ui
 gitasks ui --port 4400
+gitasks list
 gitasks list --status in-progress
 gitasks list --status unclassified
 gitasks list --state closed
@@ -96,11 +105,11 @@ BACKLOG → TODO → IN PROGRESS → REVIEW → DONE
 | `done` | Moves the issue to `DONE` and closes it |
 | `block` | Moves the issue to `BLOCKED` |
 
-Moving a completed task back to an active state reopens its GitHub Issue. Assigning any of the six statuses to an unclassified issue adds the title prefix and canonical label at that explicit point; reading, refreshing, opening the board, and `init` never classify or otherwise mutate existing issues. Transitions add and remove only `status:*` labels instead of replacing the complete label collection, so unrelated labels added concurrently are preserved.
+Moving a completed task back to an active status reopens its GitHub Issue. Status transitions add and remove only `status:*` labels, preserving unrelated labels.
 
 ## Issue protocol
 
-Each task has one canonical status label and a matching title:
+Each classified task has one canonical status label and a matching title prefix:
 
 ```text
 status:backlog       [BACKLOG] Implement login
@@ -111,63 +120,107 @@ status:done          [DONE] Implement login
 status:blocked       [BLOCKED] Implement login
 ```
 
-Labels are machine-readable and canonical. Titles mirror them for humans. If a manually created issue has no status label, Gitasks infers a recognized title prefix. If neither exists, the issue is **unclassified**—not a seventh task status—and remains unchanged until a user explicitly assigns one of the six statuses. New tasks created through Gitasks still default to `BACKLOG`.
+Labels are machine-readable and canonical; title prefixes mirror them for people. When an issue has no status label, Gitasks recognizes a matching title prefix. If neither exists, the issue is **Unclassified**—not a seventh status—and remains unchanged until a user explicitly assigns one of the six statuses. New Gitasks tasks default to `BACKLOG`.
 
-If multiple status labels conflict, a matching title prefix wins. Without a matching prefix, Gitasks resolves the first status in lifecycle definition order: `BACKLOG`, `TODO`, `IN PROGRESS`, `REVIEW`, `DONE`, then `BLOCKED`. The next explicit transition removes all conflicting `status:*` labels.
+If status labels conflict, a matching title prefix wins. Without a matching prefix, Gitasks resolves the first status in lifecycle order: `BACKLOG`, `TODO`, `IN PROGRESS`, `REVIEW`, `DONE`, then `BLOCKED`. The next explicit transition removes conflicting `status:*` labels.
 
-`gitasks list` defaults to all open issues and prints task status (or `UNCLASSIFIED`) separately from GitHub `OPEN`/`CLOSED` state. Use `--state open`, `--state closed`, or `--state all` to choose the issue scope, and combine it with any `--status` filter. Gitasks fetches every REST page and excludes pull requests; results are not silently capped.
+GitHub open/closed state remains separate from Gitasks status. `gitasks list` defaults to open issues, excludes pull requests, and prints both values. Use `--state closed` or `--state all` to change the issue scope and combine it with a `--status` filter.
 
 ## Coding agents
 
-Run `gitasks init`, then point coding agents to `AGENTS.md` and `.gitasks/protocol.md`. The generated protocol requires agents to:
+Run `gitasks init`, then direct coding agents to `AGENTS.md` and `.gitasks/protocol.md`. The protocol asks agents to:
 
-1. search existing issues for the same work before opening a new issue;
-2. reuse the relevant GitHub Issue when one exists;
-3. explicitly classify an unclassified issue when appropriate;
-4. move it to `IN PROGRESS` before implementation;
-5. move completed implementation to `REVIEW`;
-6. use `BLOCKED` when an external dependency prevents progress;
-7. avoid marking work `DONE` unless completion is explicit and appropriate.
+1. search existing issues before opening one;
+2. reuse the relevant issue when it exists;
+3. classify an unclassified issue explicitly before starting it;
+4. move active implementation to `IN PROGRESS`;
+5. move review-ready work to `REVIEW`;
+6. use `BLOCKED` for an external dependency;
+7. move work to `DONE` only when completion is explicit and appropriate.
 
-Because every transition updates GitHub directly, humans and agents share one task state.
+GitHub Issues remain canonical for roadmap work, bug reports, and feature proposals.
 
-Within one local UI server process, Gitasks serializes complete status-transition attempts per issue number, including the GitHub update and the recovery read after a failure. Different issues, separate CLI/server processes, task creation, and read-only requests are not part of that queue.
+### Ambiguous mutation recovery
 
-### Ambiguous create recovery
+Gitasks does not blindly replay a non-idempotent create, review, or merge when GitHub may already have accepted it. Follow the recovery guidance shown in the UI or CLI, inspect GitHub, and retry only after confirming the operation did not complete. A pull-request merge is tied to the reviewed head SHA and is rejected if that SHA changes.
 
-If GitHub may have accepted a create request but `gh` returned no usable response, Gitasks does not offer a blind create retry. Run `gitasks list --state all` or open the repository's Issues page, search for the exact proposed title, and reuse the issue if it exists. Retry creation only after confirming that it does not.
-
-## Repository detection
-
-Gitasks works from any directory inside a Git worktree. It reads `origin` and supports common GitHub remote forms:
+## Architecture
 
 ```text
-https://github.com/owner/repo.git
-git@github.com:owner/repo.git
+Browser on 127.0.0.1
+        │ same-origin HTTP + per-process CSRF token
+        ▼
+Gitasks Node.js server
+        │ gh api
+        ▼
+GitHub REST and GraphQL APIs
 ```
 
-No repository configuration is stored locally.
+Gitasks is a Node.js 20+ TypeScript ESM application using Commander and the installed `gh` CLI. The browser never receives GitHub credentials. There is no web framework, database, background polling, WebSocket, service account, or long-lived cache. One UI server process represents one repository. Mutations for the same issue, pull request, or milestone are serialized within that process; separate processes do not share a queue.
 
-## Development
+## Security model
+
+- The HTTP server binds only to `127.0.0.1` and checks `Host` and mutation `Origin`.
+- Mutations require a random, per-process CSRF token delivered only with the local app shell.
+- A restrictive Content Security Policy allows local assets and narrowly permits GitHub avatar images.
+- Titles, bodies, labels, diffs, logins, and other user-controlled values render as text. Only validated HTTP(S) GitHub or avatar URLs become links or images.
+- Every GitHub REST request uses `Accept: application/vnd.github+json` and `X-GitHub-Api-Version: 2026-03-10` through `gh api`.
+- Non-idempotent writes are not automatically retried after ambiguous transport results.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and supported versions.
+
+## GitHub permissions
+
+Gitasks can only perform operations allowed by the authenticated GitHub account, repository rules, branch protection, and enabled GitHub APIs.
+
+- Browsing needs repository metadata plus read access to issues and pull requests. Showing current CI results also needs Checks read and Commit statuses read.
+- Creating or editing tasks, labels, assignments, relations, and milestones needs Issues write.
+- Creating or editing pull requests, requesting reviewers, submitting reviews, changing draft state, or updating a branch needs Pull requests write.
+- Merging a pull request needs Contents write.
+- Merge methods and eligibility come from repository settings and protection rules; Gitasks does not bypass them and never offers branch deletion.
+
+Permission and unsupported-API failures remain visible instead of being replaced with fake controls or data. GitHub's accepted-permissions response is authoritative for a failed endpoint. Use `gh auth status` to inspect the current login and follow GitHub's prompt if additional authorization is required.
+
+## Data scope and limits
+
+- GitHub is queried on demand. There is no offline mode or durable local cache.
+- Lists use explicit pages or **Load more** and distinguish loaded items, known totals, and incomplete results. They do not present a loaded page as a repository total.
+- Activity contains real issue/timeline events from its stated source and date coverage; it does not synthesize activity from `updated_at` timestamps.
+- GitHub can truncate or omit large or binary diffs and can reject features unavailable to the repository or account. Gitasks states those limits and links to GitHub when appropriate.
+- GitHub API rate limits, repository visibility, organization policy, token scopes, and API availability still apply.
+- Repository detection reads the `origin` remote and supports standard HTTPS and SSH GitHub URLs. No repository credentials are stored locally.
+
+## What changed from 0.3
+
+0.3 provided the CLI and a single manually refreshed task board. 0.4 keeps the same six-status issue protocol and CLI behavior while adding the five-route workspace, shared task board/list filters, richer issue details, accessible drag and Move-to workflows, real activity, pull-request operations, milestones, explicit pagination/partial states, and guarded per-entity mutations. The localhost Host, Origin, CSRF, and CSP protections remain part of the design.
+
+## Contributing
+
+Bug reports, focused feature proposals, design feedback, documentation, tests, and code contributions are welcome. Search open and closed issues first; contributors do not need repository write access or permission to run `gitasks init`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the fork, development, security, screenshot, and pull-request workflow, and [ROADMAP.md](ROADMAP.md) for the next release direction.
+
+## Develop locally
+
+Run this checkout as 0.4 without resolving a registry package:
 
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm test
 npm run build
-npm pack --dry-run
+node dist/cli.js --version
 node dist/cli.js --help
 node dist/cli.js ui
 ```
 
-To run this checkout without confusing it with any registry package, use `node dist/cli.js <command>` after `npm run build`, or install the exact local tarball produced by `npm pack`:
+`node dist/cli.js --version` must print `0.4.0`. Package verification performs a clean build, creates a temporary tarball without invoking lifecycle scripts, checks its exact allowlist and executable shebang, installs it into a temporary project, then smokes the installed help, version, and UI routes:
 
 ```bash
-npm install -D C:/path/to/gitasks/gitasks-<version>.tgz
-npx gitasks --version
+npm run verify:package
 ```
 
-The production bundle contains the executable Node.js shebang and targets Node.js 20+ ESM. `npm pack` and `npm publish` run the `prepack` build automatically, so a clean checkout does not require a committed `dist/` directory.
+The npm package contains only the CLI bundle, three UI assets, package metadata, README, license, changelog, and security policy. Source, tests, development scripts, CI files, and the screenshot are excluded. `prepack` builds from source, so a committed `dist/` directory is not required.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md), and [ROADMAP.md](ROADMAP.md).
 
 ## License
 
