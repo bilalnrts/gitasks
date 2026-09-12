@@ -1,13 +1,30 @@
 export type IssueStateFilter = "open" | "closed" | "all";
 
 export interface TaskIssue {
+  id?: number;
+  nodeId?: string;
   number: number;
   title: string;
   state: "OPEN" | "CLOSED";
   labels: string[];
   url: string;
   body: string;
+  createdAt?: string;
+  updatedAt?: string;
+  author?: { login: string; avatarUrl: string; url: string } | null;
   assignees: string[];
+  assigneeUsers?: Array<{ login: string; avatarUrl: string; url: string }>;
+  milestone?: {
+    number: number;
+    title: string;
+    description: string;
+    state: "open" | "closed";
+    dueOn: string | null;
+    openIssues: number;
+    closedIssues: number;
+    url: string;
+    updatedAt: string;
+  } | null;
 }
 
 export interface IssueTransition {
@@ -22,6 +39,8 @@ export interface CreateIssueInput {
   body: string;
   label: string;
   state: "open" | "closed";
+  assignees?: string[];
+  milestone?: number | null;
 }
 
 export interface TaskCreator {

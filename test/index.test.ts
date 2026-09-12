@@ -267,40 +267,41 @@ describe("task transitions", () => {
 describe("issue listing", () => {
   test("paginates REST results and excludes pull requests", async () => {
     const invocations: string[][] = [];
+    const first = {
+      number: 1,
+      title: "[TODO] First",
+      state: "open",
+      labels: [{ name: "status:todo" }],
+      url: "https://api.github.com/repos/acme/example/issues/1",
+      html_url: "https://github.com/acme/example/issues/1",
+    };
+    const pull = (number: number) => ({
+      number,
+      title: "A pull request",
+      state: "open",
+      labels: [],
+      html_url: `https://github.com/acme/example/pull/${number}`,
+      pull_request: {},
+    });
     const runner: CommandRunner = async (_file, args) => {
       invocations.push([...args]);
-      return {
-        stdout: JSON.stringify([
-          [
-            {
-              number: 1,
-              title: "[TODO] First",
-              state: "open",
-              labels: [{ name: "status:todo" }],
-              url: "https://api.github.com/repos/acme/example/issues/1",
-              html_url: "https://github.com/acme/example/issues/1",
-            },
-            {
-              number: 2,
-              title: "A pull request",
-              state: "open",
-              labels: [],
-              html_url: "https://github.com/acme/example/pull/2",
-              pull_request: {},
-            },
-          ],
-          [
-            {
-              number: 3,
-              title: "[DONE] Last",
-              state: "closed",
-              labels: [{ name: "status:done" }],
-              html_url: "https://github.com/acme/example/issues/3",
-            },
-          ],
-        ]),
-        stderr: "",
-      };
+      const path = args[5] ?? "";
+      if (path.includes("state=all") && path.endsWith("page=1")) {
+        return { stdout: JSON.stringify([first, ...Array.from({ length: 99 }, (_, index) => pull(index + 2))]), stderr: "" };
+      }
+      if (path.includes("state=all") && path.endsWith("page=2")) {
+        return {
+          stdout: JSON.stringify([{
+            number: 3,
+            title: "[DONE] Last",
+            state: "closed",
+            labels: [{ name: "status:done" }],
+            html_url: "https://github.com/acme/example/issues/3",
+          }]),
+          stderr: "",
+        };
+      }
+      return { stdout: JSON.stringify([first, pull(2)]), stderr: "" };
     };
     const client = new GitHubClient("acme/example", runner);
 
@@ -310,16 +311,19 @@ describe("issue listing", () => {
     assert.equal(issues[0]?.url, "https://github.com/acme/example/issues/1");
     assert.deepEqual(invocations[0], [
       "api",
-      "repos/acme/example/issues?state=all&per_page=100",
-      "--paginate",
-      "--slurp",
+      "-H",
+      "Accept: application/vnd.github+json",
+      "-H",
+      "X-GitHub-Api-Version: 2026-03-10",
+      "repos/acme/example/issues?state=all&per_page=100&page=1",
     ]);
+    assert.equal(invocations[1]?.[5], "repos/acme/example/issues?state=all&per_page=100&page=2");
 
     const openIssues = await client.listIssues("open");
     assert.deepEqual(openIssues.map(({ number }) => number), [1]);
     assert.equal(
-      invocations[1]?.[1],
-      "repos/acme/example/issues?state=open&per_page=100",
+      invocations[2]?.[5],
+      "repos/acme/example/issues?state=open&per_page=100&page=1",
     );
   });
 

@@ -10,6 +10,8 @@ import type {
   IssueTransition,
   TaskIssue,
 } from "../src/tasks/types.js";
+import { AmbiguousMilestoneCreateError, GitHubApiError } from "../src/github/api.js";
+import type { TaskDetail } from "../src/workspace/types.js";
 import { isStatusLabel } from "../src/tasks/statuses.js";
 import {
   loadUiAssets,
@@ -46,6 +48,9 @@ class FakeBoardGateway implements BoardGateway {
   transitionDelayMs = 0;
   activeTransitions = 0;
   maxActiveTransitions = 0;
+  updateCalls = 0;
+  assigneeCalls = 0;
+
 
   async listIssues(state: "open" | "closed" | "all"): Promise<TaskIssue[]> {
     this.listCalls.push(state);
@@ -109,6 +114,48 @@ class FakeBoardGateway implements BoardGateway {
           ...this.issue.labels.filter((label) => !isStatusLabel(label)),
           transition.nextStatusLabel,
         ],
+      };
+      return this.issue;
+    } finally {
+      this.activeTransitions -= 1;
+    }
+  }
+
+  async updateIssue(
+    _issueNumber: number,
+    input: { title?: string; body?: string; milestone?: number | null },
+  ): Promise<TaskIssue> {
+    this.activeTransitions += 1;
+    this.maxActiveTransitions = Math.max(this.maxActiveTransitions, this.activeTransitions);
+    try {
+      if (this.transitionDelayMs > 0) await delay(this.transitionDelayMs);
+      this.updateCalls += 1;
+      this.issue = {
+        ...this.issue,
+        ...(input.title === undefined ? {} : { title: `[TODO] ${input.title}` }),
+        ...(input.body === undefined ? {} : { body: input.body }),
+      };
+      return this.issue;
+    } finally {
+      this.activeTransitions -= 1;
+    }
+  }
+
+  async mutateIssueAssignee(
+    _issueNumber: number,
+    login: string,
+    add: boolean,
+  ): Promise<TaskIssue> {
+    this.activeTransitions += 1;
+    this.maxActiveTransitions = Math.max(this.maxActiveTransitions, this.activeTransitions);
+    try {
+      if (this.transitionDelayMs > 0) await delay(this.transitionDelayMs);
+      this.assigneeCalls += 1;
+      this.issue = {
+        ...this.issue,
+        assignees: add
+          ? Array.from(new Set([...this.issue.assignees, login]))
+          : this.issue.assignees.filter((assignee) => assignee !== login),
       };
       return this.issue;
     } finally {
@@ -288,6 +335,45 @@ describe("local API security and validation", () => {
       });
       assert.equal(response.status, 403);
       assert.equal(gateway.createCalls, 0);
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+
+  test("rejects every workspace mutation family before route dispatch", async () => {
+    const { gateway, running, assetDirectory } = await startTestServer();
+    try {
+      const mutations = [
+        ["PATCH", "/api/issues/12"],
+        ["POST", "/api/issues/12/status"],
+        ["DELETE", "/api/issues/12/assignees"],
+        ["POST", "/api/issues/12/sub-issues"],
+        ["DELETE", "/api/issues/12/blocked-by"],
+        ["POST", "/api/milestones"],
+        ["PATCH", "/api/milestones/3"],
+        ["POST", "/api/pulls"],
+        ["PATCH", "/api/pulls/7"],
+        ["POST", "/api/pulls/7/draft"],
+        ["DELETE", "/api/pulls/7/reviewers"],
+        ["POST", "/api/pulls/7/reviews"],
+        ["POST", "/api/pulls/7/merge"],
+      ] as const;
+      for (const [method, path] of mutations) {
+        const response = await fetch(`${running.url}${path}`, {
+          method,
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "https://attacker.example",
+            "X-Gitasks-CSRF": running.csrfToken,
+          },
+          body: "{}",
+        });
+        assert.equal(response.status, 403, `${method} ${path}`);
+      }
+      assert.equal(gateway.createCalls, 0);
+      assert.equal(gateway.updateCalls, 0);
+      assert.equal(gateway.assigneeCalls, 0);
+      assert.equal(gateway.activeTransitions, 0);
     } finally {
       await stopTestServer(running, assetDirectory);
     }
@@ -529,6 +615,204 @@ describe("local API security and validation", () => {
         error: { stateVerified: boolean };
       };
       assert.equal(payload.error.stateVerified, false);
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+
+  test("serializes status, edit, and assignee mutations on the same issue key", async () => {
+    const gateway = new FakeBoardGateway();
+    gateway.transitionDelayMs = 15;
+    const { running, assetDirectory } = await startTestServer(gateway);
+    try {
+      const responses = await Promise.all([
+        fetch(`${running.url}/api/issues/12/status`, {
+          method: "POST",
+          headers: mutationHeaders(running),
+          body: JSON.stringify({ status: "review" }),
+        }),
+        fetch(`${running.url}/api/issues/12`, {
+          method: "PATCH",
+          headers: mutationHeaders(running),
+          body: JSON.stringify({ body: "Updated safely." }),
+        }),
+        fetch(`${running.url}/api/issues/12/assignees`, {
+          method: "POST",
+          headers: mutationHeaders(running),
+          body: JSON.stringify({ login: "hubot" }),
+        }),
+      ]);
+      assert.deepEqual(responses.map(({ status }) => status), [200, 200, 200]);
+      assert.equal(gateway.maxActiveTransitions, 1);
+      assert.equal(gateway.updateCalls, 1);
+      assert.equal(gateway.assigneeCalls, 1);
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+
+  test("serves only allowlisted history routes and permits only GitHub's avatar host", async () => {
+    const { running, assetDirectory } = await startTestServer();
+    try {
+      for (const route of ["/overview", "/tasks", "/activity", "/pull-requests", "/milestones"]) {
+        const response = await fetch(`${running.url}${route}`);
+        assert.equal(response.status, 200);
+        const policy = response.headers.get("content-security-policy") ?? "";
+        assert.match(policy, /img-src 'self' data: https:\/\/avatars\.githubusercontent\.com/);
+      }
+      assert.equal((await fetch(`${running.url}/settings`)).status, 404);
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+});
+
+function issueDetail(number: number): TaskDetail {
+  return {
+    task: {
+      id: number,
+      nodeId: `I_${number}`,
+      number,
+      status: null,
+      fullTitle: `Issue ${number}`,
+      title: `Issue ${number}`,
+      body: "",
+      state: "OPEN",
+      labels: [],
+      url: `https://github.com/acme/example/issues/${number}`,
+      createdAt: "",
+      updatedAt: "",
+      author: null,
+      assignees: [],
+      milestone: null,
+    },
+    parent: null,
+    subIssues: [],
+    blockedBy: [],
+    blocking: [],
+    linkedPullRequests: [],
+  };
+}
+
+describe("backend API hardening", () => {
+  test("accepts multibyte titles by character count", async () => {
+    const { running, assetDirectory } = await startTestServer();
+    try {
+      const titleResponse = await fetch(`${running.url}/api/issues/12`, {
+        method: "PATCH",
+        headers: mutationHeaders(running),
+        body: JSON.stringify({ title: "é".repeat(200) }),
+      });
+      assert.equal(titleResponse.status, 200);
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+
+  test("preserves GitHub rate limits as HTTP 429", async () => {
+    class RateLimitedGateway extends FakeBoardGateway {
+      override async getIssue(): Promise<TaskIssue> {
+        throw new GitHubApiError("API rate limit exceeded.", "rate-limit", true, true, 429);
+      }
+    }
+    const { running, assetDirectory } = await startTestServer(new RateLimitedGateway());
+    try {
+      const response = await fetch(`${running.url}/api/issues/12`);
+      assert.equal(response.status, 429);
+      const payload = await response.json() as { error: { code: string; retryable: boolean } };
+      assert.deepEqual(payload.error, { code: "rate-limit", message: "API rate limit exceeded.", retryable: true, stateVerified: true });
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+
+  test("returns milestone exact-title recovery metadata", async () => {
+    class AmbiguousMilestoneGateway extends FakeBoardGateway {
+      async createMilestone(input: { title: string }): Promise<never> {
+        throw new AmbiguousMilestoneCreateError("Milestone creation is ambiguous.", input.title, "https://github.com/acme/example/milestones");
+      }
+    }
+    const { running, assetDirectory } = await startTestServer(new AmbiguousMilestoneGateway());
+    try {
+      const response = await fetch(`${running.url}/api/milestones`, {
+        method: "POST",
+        headers: mutationHeaders(running),
+        body: JSON.stringify({ title: "Exact milestone" }),
+      });
+      assert.equal(response.status, 502);
+      const payload = await response.json() as {
+        error: { retryable: boolean };
+        recovery: { kind: string; title: string; milestonesUrl: string };
+      };
+      assert.equal(payload.error.retryable, false);
+      assert.deepEqual(payload.recovery, {
+        kind: "ambiguous-milestone-create",
+        title: "Exact milestone",
+        milestonesUrl: "https://github.com/acme/example/milestones",
+      });
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+  test("queues relation writes under both sorted issue keys", async () => {
+    class RelationGateway extends FakeBoardGateway {
+      mutationFinished = false;
+      relatedReadSawMutation = false;
+
+      async mutateSubIssue(parentNumber: number): Promise<TaskDetail> {
+        await delay(25);
+        this.mutationFinished = true;
+        return issueDetail(parentNumber);
+      }
+
+      async getIssueDetail(number: number): Promise<TaskDetail> {
+        if (number === 13) this.relatedReadSawMutation = this.mutationFinished;
+        return issueDetail(number);
+      }
+    }
+    const gateway = new RelationGateway();
+    const { running, assetDirectory } = await startTestServer(gateway);
+    try {
+      const mutation = fetch(`${running.url}/api/issues/12/sub-issues`, {
+        method: "POST",
+        headers: mutationHeaders(running),
+        body: JSON.stringify({ issueNumber: 13 }),
+      });
+      await delay(5);
+      const relatedRead = fetch(`${running.url}/api/issues/13`);
+      const [mutationResponse, readResponse] = await Promise.all([mutation, relatedRead]);
+      assert.equal(mutationResponse.status, 200);
+      assert.equal(readResponse.status, 200);
+      assert.equal(gateway.relatedReadSawMutation, true);
+    } finally {
+      await stopTestServer(running, assetDirectory);
+    }
+  });
+
+  test("waits for issue milestone mutations before reading milestone items", async () => {
+    class MilestoneItemsGateway extends FakeBoardGateway {
+      itemReadSawUpdate = false;
+
+      async getMilestoneItems() {
+        this.itemReadSawUpdate = this.updateCalls === 1;
+        return { issues: [], pullRequests: [], complete: true };
+      }
+    }
+    const gateway = new MilestoneItemsGateway();
+    gateway.transitionDelayMs = 25;
+    const { running, assetDirectory } = await startTestServer(gateway);
+    try {
+      const mutation = fetch(`${running.url}/api/issues/12`, {
+        method: "PATCH",
+        headers: mutationHeaders(running),
+        body: JSON.stringify({ milestone: 3 }),
+      });
+      await delay(5);
+      const itemRead = fetch(`${running.url}/api/milestones/3/items`);
+      const [mutationResponse, readResponse] = await Promise.all([mutation, itemRead]);
+      assert.equal(mutationResponse.status, 200);
+      assert.equal(readResponse.status, 200);
+      assert.equal(gateway.itemReadSawUpdate, true);
     } finally {
       await stopTestServer(running, assetDirectory);
     }

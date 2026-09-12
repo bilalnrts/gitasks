@@ -11,7 +11,7 @@ import { createGitHubContext, type GitHubContext } from "./github/context.js";
 import type { TaskStatus } from "./tasks/statuses.js";
 import { errorMessage, UserError } from "./utils/errors.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 function print(message: string): void {
   process.stdout.write(`${message}\n`);

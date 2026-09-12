@@ -34,6 +34,8 @@ export function normalizeIssueStateFilter(value: string): IssueStateFilter {
 export interface CreateTaskOptions {
   status?: string;
   body?: string;
+  assignees?: string[];
+  milestone?: number | null;
 }
 
 export async function createTaskIssue(
@@ -47,12 +49,15 @@ export async function createTaskIssue(
   }
 
   const status = normalizeStatus(options.status ?? "backlog");
-  return gateway.createIssue({
+  const input = {
     title: formatTaskTitle(title, status),
     body: options.body ?? "",
     label: statusLabel(status),
-    state: status === "DONE" ? "closed" : "open",
-  });
+    state: status === "DONE" ? "closed" as const : "open" as const,
+    ...(options.assignees === undefined ? {} : { assignees: options.assignees }),
+    ...(options.milestone === undefined ? {} : { milestone: options.milestone }),
+  };
+  return gateway.createIssue(input);
 }
 
 export async function transitionTask(

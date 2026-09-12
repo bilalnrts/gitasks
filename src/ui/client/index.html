@@ -5,138 +5,55 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="gitasks-csrf" content="__GITASKS_CSRF_TOKEN__">
   <meta name="color-scheme" content="light">
-  <title>Gitasks</title>
+  <meta name="theme-color" content="#f7f2ea">
+  <title>Gitasks workspace</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <div class="app-shell">
-    <header class="app-header">
-      <div class="brand-block">
-        <div class="brand-mark" aria-hidden="true">G</div>
-        <div>
-          <p class="eyebrow">Local task board</p>
-          <h1>Gitasks</h1>
-        </div>
-      </div>
-      <div class="repo-block">
-        <span class="repo-label">Repository</span>
-        <strong id="repository">Connecting…</strong>
-      </div>
-    </header>
-
-    <section class="toolbar" aria-label="Board controls">
-      <label class="search-field" for="search-input">
-        <span class="visually-hidden">Search by title or issue number</span>
-        <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m14.4 13.2 3.2 3.2-1.2 1.2-3.2-3.2a6.5 6.5 0 1 1 1.2-1.2ZM9.5 14.3a4.8 4.8 0 1 0 0-9.6 4.8 4.8 0 0 0 0 9.6Z"/></svg>
-        <input id="search-input" type="search" placeholder="Search title or #issue" autocomplete="off">
-      </label>
-      <div class="toolbar-actions">
-        <label class="state-filter" for="state-filter">
-          <span>GitHub state</span>
-          <select id="state-filter">
-            <option value="open" selected>Open</option>
-            <option value="closed">Closed</option>
-            <option value="all">All</option>
-          </select>
-        </label>
-        <button id="refresh-button" class="button secondary" type="button">
-          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M15.7 6.2A6.5 6.5 0 1 0 16 13l-1.6-.8a4.7 4.7 0 1 1-.2-4.8h-2.5V5.7h5.5v5.5h-1.7V7.6l.2-1.4Z"/></svg>
-          Refresh
-        </button>
-        <button id="new-task-button" class="button primary" type="button">
-          <span aria-hidden="true">＋</span>
-          New task
-        </button>
-      </div>
-    </section>
-
-    <section class="board-meta" aria-live="polite">
-      <p id="scope-text">Loading issue scope…</p>
-      <p>Last refreshed <time id="refresh-time">—</time></p>
-    </section>
-    <p id="status-message" class="visually-hidden" role="status" aria-live="polite"></p>
-
-    <section id="connection-error" class="state-panel error-panel" role="alert" hidden>
-      <div>
-        <strong>Could not load the board</strong>
-        <p id="connection-error-message">Check your internet connection and GitHub CLI authentication.</p>
-      </div>
-      <button id="connection-retry" class="button secondary" type="button">Retry</button>
-    </section>
-
-    <main>
-      <p id="board-scroll-hint" class="visually-hidden">Scroll the board horizontally and vertically to view every status column and task.</p>
-      <section id="loading-state" class="state-panel loading-panel" aria-live="polite">
-        <span class="loading-dot" aria-hidden="true"></span>
-        Reading GitHub Issues…
-      </section>
-      <section id="search-empty" class="state-panel" hidden>
-        <strong>No matching tasks</strong>
-        <p>Try a different title or issue number.</p>
-      </section>
-      <section id="unclassified-panel" class="unclassified-panel" aria-labelledby="unclassified-title" hidden>
-        <header class="unclassified-header">
-          <div>
-            <h2 id="unclassified-title">Unclassified issues</h2>
-            <p>No recognized Gitasks status label or title prefix. Assigning a status updates GitHub.</p>
-          </div>
-          <span id="unclassified-count" class="count">0</span>
-        </header>
-        <div id="unclassified-list" class="unclassified-list"></div>
-      </section>
-      <div id="board" class="board" tabindex="0" aria-label="Gitasks status board" aria-describedby="board-scroll-hint" hidden></div>
-    </main>
-  </div>
-
-  <dialog id="create-dialog" class="modal" aria-labelledby="create-dialog-title">
-    <form id="create-form" method="dialog">
-      <header class="dialog-header">
-        <div>
-          <p class="eyebrow">GitHub Issue</p>
-          <h2 id="create-dialog-title">Create a task</h2>
-        </div>
-        <button class="icon-button" type="button" data-close="create-dialog" aria-label="Close create task form">×</button>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div id="app" class="app-shell">
+    <aside id="sidebar" class="sidebar" aria-label="Gitasks navigation">
+      <header class="sidebar-header">
+        <a class="brand" href="/overview" data-route>
+          <span class="brand-mark" aria-hidden="true">G</span>
+          <span><strong>Gitasks</strong><small>Issue workspace</small></span>
+        </a>
+        <button id="sidebar-close" class="icon-button" type="button" aria-label="Close navigation" hidden>Close</button>
       </header>
-      <div class="form-body">
-        <label for="task-title">Title</label>
-        <input id="task-title" name="title" type="text" maxlength="256" required autofocus placeholder="What needs to be done?">
-
-        <label for="task-body">Description <span>optional</span></label>
-        <textarea id="task-body" name="body" rows="7" placeholder="Add context, acceptance criteria, or implementation notes."></textarea>
-
-        <label for="task-status">Initial status</label>
-        <select id="task-status" name="status"></select>
-        <p class="form-note">Creates a GitHub Issue immediately.</p>
-        <p id="create-error" class="inline-error" role="alert" hidden></p>
-      </div>
-      <footer class="dialog-footer">
-        <button class="button secondary" type="button" data-close="create-dialog">Cancel</button>
-        <button id="create-submit" class="button primary" type="submit">Create task</button>
+      <nav class="primary-nav" aria-label="Primary">
+        <a href="/overview" data-route><span aria-hidden="true">◫</span>Overview</a>
+        <a href="/tasks" data-route><span aria-hidden="true">✓</span>Tasks</a>
+        <a href="/activity" data-route><span aria-hidden="true">↻</span>Activity</a>
+        <a href="/pull-requests" data-route><span aria-hidden="true">⑂</span>Pull Requests</a>
+        <a href="/milestones" data-route><span aria-hidden="true">◇</span>Milestones</a>
+      </nav>
+      <footer class="sidebar-footer">
+        <p class="eyebrow">Repository</p>
+        <strong id="repository-name">Loading repository…</strong>
+        <a id="repository-link" class="text-link" target="_blank" rel="noreferrer" hidden>Open on GitHub ↗</a>
+        <span id="app-version">v0.4.0</span>
       </footer>
-    </form>
-  </dialog>
-
-  <dialog id="detail-dialog" class="drawer" aria-labelledby="detail-title">
-    <article>
-      <header class="dialog-header detail-header">
-        <div>
-          <p id="detail-number" class="eyebrow">Issue</p>
-          <h2 id="detail-title">Task details</h2>
-        </div>
-        <button class="icon-button" type="button" data-close="detail-dialog" aria-label="Close task details">×</button>
+    </aside>
+    <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="Close navigation" hidden></button>
+    <div id="workspace" class="workspace">
+      <header class="mobile-header">
+        <button id="sidebar-toggle" class="button secondary" type="button" aria-controls="sidebar" aria-expanded="false">Menu</button>
+        <a class="mobile-brand" href="/overview" data-route>Gitasks</a>
+        <span class="mobile-repo" aria-hidden="true">Workspace</span>
       </header>
-      <div id="detail-content" class="detail-content"></div>
-    </article>
-  </dialog>
-
-  <div id="toast" class="toast" role="alert" hidden>
-    <div>
-      <strong id="toast-title">Action failed</strong>
-      <p id="toast-message"></p>
+      <main id="main-content" tabindex="-1">
+        <div id="view-root" aria-live="off">
+          <section class="state-panel state-loading" aria-busy="true">
+            <strong>Opening Gitasks</strong>
+            <p>Reading repository context…</p>
+          </section>
+        </div>
+      </main>
     </div>
-    <button id="toast-retry" class="button compact" type="button" hidden>Retry</button>
-    <button id="toast-dismiss" class="icon-button" type="button" aria-label="Dismiss message">×</button>
   </div>
+  <div id="overlay-root"></div>
+  <div id="toast-region" class="toast-region" aria-label="Notifications"></div>
+  <p id="announcer" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></p>
 </body>
 </html>
