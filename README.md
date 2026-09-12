@@ -71,7 +71,7 @@ BACKLOG → TODO → IN PROGRESS → REVIEW → DONE
 | `done` | Moves the issue to `DONE` and closes it |
 | `block` | Moves the issue to `BLOCKED` |
 
-Moving a completed task back to an active state reopens its GitHub Issue. Status changes preserve unrelated labels.
+Moving a completed task back to an active state reopens its GitHub Issue. Transitions add and remove only `status:*` labels instead of replacing the complete label collection, so unrelated labels added concurrently are preserved.
 
 ## Issue protocol
 
@@ -88,7 +88,9 @@ status:blocked       [BLOCKED] Implement login
 
 Labels are machine-readable and canonical. Titles mirror them for humans. If a manually created issue has no status label, Gitasks infers the title prefix; if neither exists, it treats the issue as `BACKLOG`.
 
-By default, `gitasks list` displays open, non-`DONE` tasks. Use `gitasks list --status done` to include completed and closed issues.
+If multiple status labels conflict, a matching title prefix wins. Without a matching prefix, Gitasks resolves the first status in lifecycle definition order: `BACKLOG`, `TODO`, `IN PROGRESS`, `REVIEW`, `DONE`, then `BLOCKED`. The next transition removes all conflicting `status:*` labels.
+
+By default, `gitasks list` displays open, non-`DONE` tasks. An explicit `--status` filter searches both open and closed issues, so manually closed active tasks and completed tasks remain queryable. Open/closed state does not override the canonical label or inferred title status.
 
 ## Coding agents
 
@@ -124,7 +126,7 @@ npm pack --dry-run
 node dist/cli.js --help
 ```
 
-The production bundle contains the executable Node.js shebang and targets Node.js 20+ ESM.
+The production bundle contains the executable Node.js shebang and targets Node.js 20+ ESM. `npm pack` and `npm publish` run the `prepack` build automatically, so a clean checkout does not require a committed `dist/` directory.
 
 ## License
 

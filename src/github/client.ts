@@ -1,5 +1,9 @@
-import { STATUS_DEFINITIONS } from "../tasks/statuses.js";
-import type { IssueUpdate, TaskGateway, TaskIssue } from "../tasks/types.js";
+import { STATUS_DEFINITIONS, isStatusLabel } from "../tasks/statuses.js";
+import type {
+  IssueTransition,
+  TaskGateway,
+  TaskIssue,
+} from "../tasks/types.js";
 import type { CommandRunner } from "../utils/exec.js";
 import { errorMessage, UserError } from "../utils/errors.js";
 
@@ -19,7 +23,7 @@ function toTaskIssue(issue: GitHubIssueJson): TaskIssue {
     title: issue.title,
     state: issue.state.toUpperCase() === "CLOSED" ? "CLOSED" : "OPEN",
     labels: issue.labels.map(({ name }) => name),
-    url: issue.url ?? issue.html_url ?? "",
+    url: issue.html_url ?? issue.url ?? "",
   };
 }
 
@@ -29,19 +33,40 @@ export class GitHubClient implements TaskGateway {
     private readonly runner: CommandRunner,
   ) {}
 
-  private async runJson<T>(args: readonly string[], context: string): Promise<T> {
-    let stdout: string;
+  private async run(args: readonly string[], context: string): Promise<string> {
     try {
-      stdout = (await this.runner("gh", args)).stdout;
+      return (await this.runner("gh", args)).stdout;
     } catch (error) {
       throw new UserError(`${context}\n\n${errorMessage(error)}`);
     }
+  }
 
+  private async runJson<T>(args: readonly string[], context: string): Promise<T> {
+    const stdout = await this.run(args, context);
     try {
       return JSON.parse(stdout) as T;
     } catch {
       throw new UserError(
         `${context}\n\nGitHub CLI returned an unexpected response.`,
+      );
+    }
+  }
+
+  private async removeLabel(issueNumber: number, label: string): Promise<void> {
+    try {
+      await this.runner("gh", [
+        "api",
+        "--method",
+        "DELETE",
+        `repos/${this.repository}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+      ]);
+    } catch (error) {
+      const detail = errorMessage(error);
+      if (/\b404\b|label does not exist/i.test(detail)) {
+        return;
+      }
+      throw new UserError(
+        `Could not remove status label ${label} from issue #${issueNumber}.\n\n${detail}`,
       );
     }
   }
@@ -59,8 +84,8 @@ export class GitHubClient implements TaskGateway {
         continue;
       }
 
-      try {
-        await this.runner("gh", [
+      await this.run(
+        [
           "label",
           "create",
           definition.label,
@@ -70,12 +95,9 @@ export class GitHubClient implements TaskGateway {
           definition.color,
           "--description",
           `Gitasks status: ${definition.name}`,
-        ]);
-      } catch (error) {
-        throw new UserError(
-          `Could not create label ${definition.label}.\n\n${errorMessage(error)}`,
-        );
-      }
+        ],
+        `Could not create label ${definition.label}.`,
+      );
       created.push(definition.label);
     }
 
@@ -83,22 +105,23 @@ export class GitHubClient implements TaskGateway {
   }
 
   async listIssues(state: "open" | "all"): Promise<TaskIssue[]> {
-    const issues = await this.runJson<GitHubIssueJson[]>(
+    const pages = await this.runJson<GitHubIssueJson[][]>(
       [
-        "issue",
-        "list",
-        "--repo",
-        this.repository,
-        "--state",
-        state,
-        "--limit",
-        "1000",
-        "--json",
-        "number,title,state,labels,url",
+        "api",
+        `repos/${this.repository}/issues?state=${state}&per_page=100`,
+        "--paginate",
+        "--slurp",
       ],
       "Could not list GitHub issues.",
     );
-    return issues.map(toTaskIssue);
+    return pages
+      .flat()
+      .filter(
+        (issue) =>
+          issue.pull_request === undefined &&
+          (state === "all" || issue.state.toLowerCase() === "open"),
+      )
+      .map(toTaskIssue);
   }
 
   async getIssue(issueNumber: number): Promise<TaskIssue> {
@@ -135,28 +158,55 @@ export class GitHubClient implements TaskGateway {
     return toTaskIssue(issue);
   }
 
-  async updateIssue(
+  async transitionIssue(
     issueNumber: number,
-    update: IssueUpdate,
+    transition: IssueTransition,
   ): Promise<TaskIssue> {
-    const args = [
-      "api",
-      "--method",
-      "PATCH",
-      `repos/${this.repository}/issues/${issueNumber}`,
-      "--raw-field",
-      `title=${update.title}`,
-      "--raw-field",
-      `state=${update.state}`,
-    ];
-    for (const label of update.labels) {
-      args.push("--raw-field", `labels[]=${label}`);
-    }
+    await this.runJson<Array<{ name: string }>>(
+      [
+        "api",
+        "--method",
+        "POST",
+        `repos/${this.repository}/issues/${issueNumber}/labels`,
+        "--raw-field",
+        `labels[]=${transition.nextStatusLabel}`,
+      ],
+      `Could not add status label ${transition.nextStatusLabel} to issue #${issueNumber}.`,
+    );
 
-    const issue = await this.runJson<GitHubIssueJson>(
-      args,
+    await this.runJson<GitHubIssueJson>(
+      [
+        "api",
+        "--method",
+        "PATCH",
+        `repos/${this.repository}/issues/${issueNumber}`,
+        "--raw-field",
+        `title=${transition.title}`,
+        "--raw-field",
+        `state=${transition.state}`,
+      ],
       `Could not update issue #${issueNumber}.`,
     );
-    return toTaskIssue(issue);
+
+    for (const label of transition.previousStatusLabels) {
+      if (label.toLowerCase() !== transition.nextStatusLabel.toLowerCase()) {
+        await this.removeLabel(issueNumber, label);
+      }
+    }
+
+    let updated = await this.getIssue(issueNumber);
+    const conflictingLabels = updated.labels.filter(
+      (label) =>
+        isStatusLabel(label) &&
+        label.toLowerCase() !== transition.nextStatusLabel.toLowerCase(),
+    );
+    for (const label of conflictingLabels) {
+      await this.removeLabel(issueNumber, label);
+    }
+    if (conflictingLabels.length > 0) {
+      updated = await this.getIssue(issueNumber);
+    }
+
+    return updated;
   }
 }

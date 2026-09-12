@@ -6,13 +6,17 @@ export interface TaskIssue {
   url: string;
 }
 
-export interface IssueUpdate {
+export interface IssueTransition {
   title: string;
   state: "open" | "closed";
-  labels: string[];
+  previousStatusLabels: string[];
+  nextStatusLabel: string;
 }
 
 export interface TaskGateway {
   getIssue(issueNumber: number): Promise<TaskIssue>;
-  updateIssue(issueNumber: number, update: IssueUpdate): Promise<TaskIssue>;
+  transitionIssue(
+    issueNumber: number,
+    transition: IssueTransition,
+  ): Promise<TaskIssue>;
 }

@@ -7,12 +7,12 @@ export interface ListOptions {
 }
 
 export async function listTasks(
-  client: GitHubClient,
+  client: Pick<GitHubClient, "listIssues">,
   options: ListOptions,
 ): Promise<string> {
   const statusFilter: TaskStatus | undefined =
     options.status === undefined ? undefined : normalizeStatus(options.status);
-  const issues = await client.listIssues(statusFilter === "DONE" ? "all" : "open");
+  const issues = await client.listIssues(statusFilter === undefined ? "open" : "all");
   const tasks = issues
     .map((issue) => ({ issue, status: taskStatus(issue), title: taskTitle(issue) }))
     .filter(({ status }) =>

@@ -1,4 +1,5 @@
 import {
+  STATUS_DEFINITIONS,
   statusFromLabel,
   tryNormalizeStatus,
   type TaskStatus,
@@ -54,12 +55,21 @@ export function inferTaskStatus(
   labels: readonly string[],
   title: string,
 ): TaskStatus {
+  const labeledStatuses: TaskStatus[] = [];
   for (const label of labels) {
     const status = statusFromLabel(label);
-    if (status !== undefined) {
-      return status;
+    if (status !== undefined && !labeledStatuses.includes(status)) {
+      labeledStatuses.push(status);
     }
   }
 
-  return parseTaskTitle(title).status ?? "BACKLOG";
+  const titleStatus = parseTaskTitle(title).status;
+  if (labeledStatuses.length === 0) {
+    return titleStatus ?? "BACKLOG";
+  }
+  if (titleStatus !== undefined && labeledStatuses.includes(titleStatus)) {
+    return titleStatus;
+  }
+
+  return STATUS_DEFINITIONS.find(({ name }) => labeledStatuses.includes(name))!.name;
 }

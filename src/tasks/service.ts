@@ -29,12 +29,11 @@ export async function transitionTask(
   const issueNumber = parseIssueNumber(issueInput);
   const issue = await gateway.getIssue(issueNumber);
   const title = formatTaskTitle(issue.title, status);
-  const labels = issue.labels.filter((label) => !isStatusLabel(label));
-  labels.push(statusLabel(status));
 
-  return gateway.updateIssue(issueNumber, {
+  return gateway.transitionIssue(issueNumber, {
     title,
-    labels,
+    previousStatusLabels: issue.labels.filter(isStatusLabel),
+    nextStatusLabel: statusLabel(status),
     state: status === "DONE" ? "closed" : "open",
   });
 }

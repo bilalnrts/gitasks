@@ -12,6 +12,8 @@ GitHub Issues are this repository's task management source of truth. Do not crea
 - If progress depends on missing information or an external dependency, run `gitasks block <issue-number>`.
 - Do not silently change issue status outside this protocol.
 - Preserve unrelated issue labels during status changes.
+- If an issue has conflicting status labels, its matching title prefix wins; otherwise Gitasks uses the first status in protocol order.
+- A filtered list searches open and closed issues. The default unfiltered list shows only active open work.
 
 ## Statuses
 
