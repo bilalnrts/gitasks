@@ -1,0 +1,48 @@
+{
+  "name": "gitasks",
+  "version": "0.1.0",
+  "description": "A lightweight local task protocol for humans and coding agents, powered entirely by GitHub Issues.",
+  "type": "module",
+  "bin": {
+    "gitasks": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --platform node --target node20 --clean --minify --no-sourcemap",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx --test test/index.test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "keywords": [
+    "github-issues",
+    "task-management",
+    "cli",
+    "coding-agents"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bilalnrts/gitasks.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bilalnrts/gitasks/issues"
+  },
+  "homepage": "https://github.com/bilalnrts/gitasks#readme",
+  "dependencies": {
+    "commander": "^14.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

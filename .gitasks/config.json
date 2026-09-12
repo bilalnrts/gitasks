@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "statuses": [
+    "BACKLOG",
+    "TODO",
+    "IN PROGRESS",
+    "REVIEW",
+    "DONE",
+    "BLOCKED"
+  ]
+}
