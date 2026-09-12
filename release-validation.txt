@@ -1,1 +1,2 @@
 Gitasks 0.4.0 isolated pull request validation base.
+Draft pull request lifecycle validation change.
