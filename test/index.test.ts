@@ -156,6 +156,8 @@ describe("task transitions", () => {
       state: "CLOSED",
       labels: ["bug", "status:done", "STATUS:legacy"],
       url: "https://github.com/acme/example/issues/42",
+      body: "",
+      assignees: [],
     });
 
     const updated = await transitionTask(gateway, "#42", "IN PROGRESS");
@@ -178,6 +180,8 @@ describe("task transitions", () => {
       state: "OPEN",
       labels: ["status:review"],
       url: "https://github.com/acme/example/issues/7",
+      body: "",
+      assignees: [],
     });
 
     const updated = await transitionTask(gateway, "7", "DONE");
@@ -307,6 +311,8 @@ describe("issue listing", () => {
           state: "CLOSED",
           labels: ["status:todo"],
           url: "https://github.com/acme/example/issues/4",
+          body: "",
+          assignees: [],
         }];
       },
     };

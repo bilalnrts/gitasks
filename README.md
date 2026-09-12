@@ -37,10 +37,32 @@ AGENTS.md
 
 If `AGENTS.md` already exists, Gitasks appends a clearly marked task-management section. Re-running `init` is safe.
 
+## Local task board
+
+Start the lightweight local board from anywhere inside the target Git repository:
+
+```bash
+npx gitasks ui
+```
+
+The default address is `http://127.0.0.1:4317`. Choose another port when needed:
+
+```bash
+npx gitasks ui --port 4400
+```
+
+The board shows all six Gitasks statuses, including closed `DONE` tasks. It supports local search, manual refresh, issue details, task creation, and status changes. Every create or status action writes directly to GitHub through the authenticated `gh` CLI; an internet connection is required. Browser code never receives GitHub credentials.
+
+The server listens only on `127.0.0.1`, validates the request host and origin, and requires a per-process CSRF token for mutations. Stop it with `Ctrl+C`.
+
+Current limitations: one repository per server process, manual refresh only, no drag-and-drop, no comments or PR management, and no offline mode.
+
 ## Commands
 
 ```bash
 gitasks list
+gitasks ui
+gitasks ui --port 4400
 gitasks list --status in-progress
 gitasks create "Implement login"
 gitasks create "Implement login" --status todo
@@ -124,6 +146,7 @@ npm test
 npm run build
 npm pack --dry-run
 node dist/cli.js --help
+node dist/cli.js ui
 ```
 
 The production bundle contains the executable Node.js shebang and targets Node.js 20+ ESM. `npm pack` and `npm publish` run the `prepack` build automatically, so a clean checkout does not require a committed `dist/` directory.

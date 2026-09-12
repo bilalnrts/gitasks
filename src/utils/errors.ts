@@ -1,3 +1,5 @@
+import type { TaskIssue } from "../tasks/types.js";
+
 export class UserError extends Error {
   readonly exitCode: number;
 
@@ -5,6 +7,16 @@ export class UserError extends Error {
     super(message);
     this.name = "UserError";
     this.exitCode = exitCode;
+  }
+}
+
+export class PartialCreateError extends UserError {
+  readonly issue: TaskIssue;
+
+  constructor(message: string, issue: TaskIssue) {
+    super(message);
+    this.name = "PartialCreateError";
+    this.issue = issue;
   }
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "gitasks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A lightweight local task protocol for humans and coding agents, powered entirely by GitHub Issues.",
   "type": "module",
   "bin": {
@@ -15,9 +15,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/cli.ts --format esm --platform node --target node20 --clean --minify --no-sourcemap",
+    "build": "tsup src/cli.ts --format esm --platform node --target node20 --clean --minify --no-sourcemap && tsup src/ui/client/app.ts --format iife --platform browser --target es2020 --out-dir dist/ui --minify --no-sourcemap --global-name GitasksUi && node scripts/copy-ui-assets.mjs",
     "dev": "tsx src/cli.ts",
-    "test": "tsx --test test/index.test.ts",
+    "test": "tsx --test test/index.test.ts test/ui.test.ts",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run build",
     "prepublishOnly": "npm run typecheck && npm test"

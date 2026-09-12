@@ -1,16 +1,19 @@
 import { STATUS_DEFINITIONS, isStatusLabel } from "../tasks/statuses.js";
 import type {
+  CreateIssueInput,
   IssueTransition,
   TaskGateway,
   TaskIssue,
 } from "../tasks/types.js";
 import type { CommandRunner } from "../utils/exec.js";
-import { errorMessage, UserError } from "../utils/errors.js";
+import { errorMessage, PartialCreateError, UserError } from "../utils/errors.js";
 
 interface GitHubIssueJson {
   number: number;
   title: string;
   state: string;
+  body?: string | null;
+  assignees?: Array<{ login: string }>;
   labels: Array<{ name: string }>;
   url?: string;
   html_url?: string;
@@ -24,6 +27,8 @@ function toTaskIssue(issue: GitHubIssueJson): TaskIssue {
     state: issue.state.toUpperCase() === "CLOSED" ? "CLOSED" : "OPEN",
     labels: issue.labels.map(({ name }) => name),
     url: issue.html_url ?? issue.url ?? "",
+    body: issue.body ?? "",
+    assignees: issue.assignees?.map(({ login }) => login) ?? [],
   };
 }
 
@@ -135,11 +140,7 @@ export class GitHubClient implements TaskGateway {
     return toTaskIssue(issue);
   }
 
-  async createIssue(options: {
-    title: string;
-    body: string;
-    label: string;
-  }): Promise<TaskIssue> {
+  async createIssue(options: CreateIssueInput): Promise<TaskIssue> {
     const issue = await this.runJson<GitHubIssueJson>(
       [
         "api",
@@ -155,7 +156,26 @@ export class GitHubClient implements TaskGateway {
       ],
       "Could not create the GitHub issue.",
     );
-    return toTaskIssue(issue);
+    if (options.state === "open") {
+      return toTaskIssue(issue);
+    }
+
+    try {
+      const closedIssue = await this.runJson<GitHubIssueJson>(
+        [
+          "api",
+          "--method",
+          "PATCH",
+          `repos/${this.repository}/issues/${issue.number}`,
+          "--raw-field",
+          "state=closed",
+        ],
+        `Created issue #${issue.number} but could not close it.`,
+      );
+      return toTaskIssue(closedIssue);
+    } catch (error) {
+      throw new PartialCreateError(errorMessage(error), toTaskIssue(issue));
+    }
   }
 
   async transitionIssue(

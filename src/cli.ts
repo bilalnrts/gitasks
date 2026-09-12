@@ -6,11 +6,12 @@ import { createTask } from "./commands/create.js";
 import { initializeRepository } from "./commands/init.js";
 import { listTasks } from "./commands/list.js";
 import { moveTask } from "./commands/transition.js";
+import { uiCommand } from "./commands/ui.js";
 import { createGitHubContext, type GitHubContext } from "./github/context.js";
 import type { TaskStatus } from "./tasks/statuses.js";
 import { errorMessage, UserError } from "./utils/errors.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 function print(message: string): void {
   process.stdout.write(`${message}\n`);
@@ -114,6 +115,7 @@ async function main(): Promise<void> {
   listCommand(program);
   createCommand(program);
   transitionCommands(program);
+  uiCommand(program);
 
   await program.parseAsync(process.argv);
 }

@@ -1,6 +1,6 @@
 import { formatTaskTitle, inferTaskStatus, stripTaskStatusPrefixes } from "./parser.js";
-import { isStatusLabel, statusLabel, type TaskStatus } from "./statuses.js";
-import type { TaskGateway, TaskIssue } from "./types.js";
+import { isStatusLabel, normalizeStatus, statusLabel, type TaskStatus } from "./statuses.js";
+import type { TaskCreator, TaskGateway, TaskIssue } from "./types.js";
 import { UserError } from "../utils/errors.js";
 
 export function parseIssueNumber(value: string): number {
@@ -19,6 +19,30 @@ export function taskTitle(issue: TaskIssue): string {
 
 export function taskStatus(issue: TaskIssue): TaskStatus {
   return inferTaskStatus(issue.labels, issue.title);
+}
+
+export interface CreateTaskOptions {
+  status?: string;
+  body?: string;
+}
+
+export async function createTaskIssue(
+  gateway: TaskCreator,
+  titleInput: string,
+  options: CreateTaskOptions,
+): Promise<TaskIssue> {
+  const title = stripTaskStatusPrefixes(titleInput);
+  if (title.length === 0) {
+    throw new UserError("Task title cannot be empty.");
+  }
+
+  const status = normalizeStatus(options.status ?? "backlog");
+  return gateway.createIssue({
+    title: formatTaskTitle(title, status),
+    body: options.body ?? "",
+    label: statusLabel(status),
+    state: status === "DONE" ? "closed" : "open",
+  });
 }
 
 export async function transitionTask(
