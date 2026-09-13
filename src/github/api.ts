@@ -36,6 +36,12 @@ function statusFromMessage(message: string): number | undefined {
 function classifyError(context: string, error: unknown, mutation: boolean, unsupportedOnNotFound = false): GitHubApiError {
   const detail = errorMessage(error);
   const status = statusFromMessage(detail);
+  if (error instanceof Error && error.name === "AbortError") {
+    return new GitHubApiError(`${context}\n\nThe request was cancelled.`, "aborted", true, true);
+  }
+  if (error instanceof CommandError && error.causeCode === "ABORT_ERR") {
+    return new GitHubApiError(`${context}\n\nThe request was cancelled.`, "aborted", true, true);
+  }
   if (error instanceof CommandError && error.causeCode === "ENOENT") {
     return new GitHubApiError(`${context}\n\n${detail}`, "gh-unavailable", false, true);
   }
@@ -52,12 +58,25 @@ function classifyError(context: string, error: unknown, mutation: boolean, unsup
   return new GitHubApiError(`${context}\n\n${detail}`, mutation && !definite ? "ambiguous" : "github", !mutation && !definite, definite, status);
 }
 
-interface RestOptions {
+export interface RestOptions {
   method?: string;
   fields?: ReadonlyArray<readonly [string, string]>;
   typedFields?: ReadonlyArray<readonly [string, string]>;
   mutation?: boolean;
   unsupportedOnNotFound?: boolean;
+  signal?: AbortSignal | undefined;
+}
+
+export interface RestResponse {
+  status: number;
+  headers: Readonly<Record<string, string>>;
+  body: string;
+}
+
+export interface PageResult {
+  items: unknown[];
+  complete: boolean;
+  pages: number;
 }
 
 export class GitHubApi {
@@ -75,9 +94,46 @@ export class GitHubApi {
     for (const [name, value] of options.fields ?? []) args.push("--raw-field", `${name}=${value}`);
     for (const [name, value] of options.typedFields ?? []) args.push("--field", `${name}=${value}`);
     try {
-      return (await this.runner("gh", args)).stdout;
+      return (await this.runner("gh", args, { signal: options.signal })).stdout;
     } catch (error) {
       throw classifyError(context, error, options.mutation ?? options.method !== undefined, options.unsupportedOnNotFound);
+    }
+  }
+  async restResponse(path: string, context: string, options: RestOptions = {}): Promise<RestResponse> {
+    const args = this.restArgs(path, options.method);
+    args.splice(1, 0, "--include");
+    for (const [name, value] of options.fields ?? []) args.push("--raw-field", `${name}=${value}`);
+    for (const [name, value] of options.typedFields ?? []) args.push("--field", `${name}=${value}`);
+    let stdout: string;
+    try {
+      stdout = (await this.runner("gh", args, { signal: options.signal })).stdout.replace(/\r\n/g, "\n");
+    } catch (error) {
+      throw classifyError(context, error, options.mutation ?? options.method !== undefined, options.unsupportedOnNotFound);
+    }
+    const matches = [...stdout.matchAll(/^HTTP\/\S+\s+(\d{3})[^\n]*\n/gm)];
+    const last = matches.at(-1);
+    if (last === undefined || last.index === undefined || last[1] === undefined) {
+      throw new GitHubApiError(`${context}\n\nGitHub CLI returned an unexpected response.`, "invalid-response", false, false);
+    }
+    const response = stdout.slice(last.index);
+    const boundary = response.indexOf("\n\n");
+    if (boundary < 0) throw new GitHubApiError(`${context}\n\nGitHub CLI returned malformed response headers.`, "invalid-response", false, false);
+    const headerLines = response.slice(0, boundary).split("\n").slice(1);
+    const headers: Record<string, string> = {};
+    for (const line of headerLines) {
+      const separator = line.indexOf(":");
+      if (separator > 0) headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+    }
+    return { status: Number(last[1]), headers, body: response.slice(boundary + 2) };
+  }
+
+  async restJsonResponse(path: string, context: string, options: RestOptions = {}): Promise<{ status: number; headers: Readonly<Record<string, string>>; value: unknown }> {
+    const response = await this.restResponse(path, context, options);
+    if (response.status === 202 || response.status === 204) return { status: response.status, headers: response.headers, value: null };
+    try {
+      return { status: response.status, headers: response.headers, value: JSON.parse(response.body) as unknown };
+    } catch {
+      throw new GitHubApiError(`${context}\n\nGitHub CLI returned an unexpected response.`, options.mutation ?? options.method !== undefined ? "ambiguous" : "invalid-response", false, false, response.status);
     }
   }
 
@@ -90,11 +146,11 @@ export class GitHubApi {
     }
   }
 
-  async graphql(query: string, variables: ReadonlyArray<readonly [string, string]>, context: string, mutation = false): Promise<unknown> {
+  async graphql(query: string, variables: ReadonlyArray<readonly [string, string]>, context: string, mutation = false, signal?: AbortSignal): Promise<unknown> {
     const args = ["api", "graphql", "-f", `query=${query}`];
     for (const [name, value] of variables) args.push("-F", `${name}=${value}`);
     try {
-      const stdout = (await this.runner("gh", args)).stdout;
+      const stdout = (await this.runner("gh", args, { signal })).stdout;
       try {
         return JSON.parse(stdout) as unknown;
       } catch {
@@ -106,15 +162,32 @@ export class GitHubApi {
     }
   }
 
-  async allPages(path: string, context: string, options: Pick<RestOptions, "unsupportedOnNotFound"> = {}): Promise<unknown[]> {
+  async pages(path: string, context: string, options: Pick<RestOptions, "unsupportedOnNotFound" | "signal"> & { maxPages?: number } = {}): Promise<PageResult> {
     const separator = path.includes("?") ? "&" : "?";
     const result: unknown[] = [];
-    for (let page = 1; ; page += 1) {
+    const stableIds = new Set<string>();
+    const maxPages = options.maxPages ?? Number.POSITIVE_INFINITY;
+    for (let page = 1; page <= maxPages; page += 1) {
       const value = await this.restJson(`${path}${separator}per_page=100&page=${page}`, context, options);
       if (!Array.isArray(value)) throw new GitHubApiError(`${context}\n\nGitHub CLI returned an unexpected response.`, "invalid-response", false, false);
-      result.push(...value);
-      if (value.length < 100) return result;
+      for (const item of value) {
+        const object = item !== null && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : null;
+        const rawId = object?.id ?? object?.node_id;
+        if (typeof rawId === "number" || typeof rawId === "string") {
+          const id = `${typeof rawId}:${String(rawId)}`;
+          if (stableIds.has(id)) continue;
+          stableIds.add(id);
+        }
+        result.push(item);
+      }
+      if (value.length < 100) return { items: result, complete: true, pages: page };
+      if (page === maxPages) return { items: result, complete: false, pages: page };
     }
+    return { items: result, complete: true, pages: 0 };
+  }
+
+  async allPages(path: string, context: string, options: Pick<RestOptions, "unsupportedOnNotFound" | "signal"> = {}): Promise<unknown[]> {
+    return (await this.pages(path, context, options)).items;
   }
 }
 

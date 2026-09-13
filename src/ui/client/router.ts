@@ -14,6 +14,7 @@ const ROUTE_NAMES: Record<string, RouteName> = {
   "/activity": "activity",
   "/pull-requests": "pull-requests",
   "/milestones": "milestones",
+  "/analytics": "analytics",
 };
 
 export type RouteListener = (route: AppRoute, kind: "push" | "replace" | "pop") => void;

@@ -4,10 +4,10 @@
 
 | Version | Security updates |
 | --- | --- |
-| 0.4.x | Supported |
-| 0.3.x and earlier | Not supported |
+| 0.5.x | Supported |
+| 0.4.x and earlier | Not supported |
 
-Use the latest available 0.4 patch before reporting a problem.
+Use the latest available 0.5 patch before reporting a problem.
 
 ## Report a vulnerability privately
 
@@ -33,6 +33,8 @@ If private vulnerability reporting is unavailable, contact the repository owner 
 Gitasks is a development-only local tool. It binds its HTTP server to `127.0.0.1`, validates Host and mutation Origin, requires a per-process CSRF token, and serves a restrictive Content Security Policy. GitHub operations run through the authenticated `gh` CLI; credentials are not sent to browser JavaScript or stored by Gitasks.
 
 User-controlled GitHub content must render as text. Only validated HTTP(S) GitHub and avatar URLs may become links or images. Gitasks does not provide a hosted service, database, polling process, WebSocket, admin merge bypass, or branch deletion control.
+
+Repository Analytics is read-only. Analytics routes accept only validated, allowlisted filter values and never accept a repository, URL, filesystem path, or command from the browser. Cached datasets are bounded to the current repository and authenticated GitHub user and are invalidated after mutations. CSV export escapes RFC 4180 fields and prefixes spreadsheet-formula characters; exported content can still contain repository data and should be handled accordingly.
 
 These controls do not replace workstation security, GitHub repository permissions, organization policy, branch protection, or credential hygiene. Anyone able to execute software as the same local user may be able to invoke that user's `gh` authentication independently of Gitasks.
 

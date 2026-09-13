@@ -1,3 +1,18 @@
+import type {
+  AnalyticsCommitWeek,
+  AnalyticsCoverageSource,
+  AnalyticsDataset,
+  AnalyticsEvent,
+  AnalyticsQuery,
+  AnalyticsEventType,
+  AnalyticsIssue,
+  AnalyticsMilestone,
+  AnalyticsPerson,
+  AnalyticsPullRequest,
+  AnalyticsRelease,
+  AnalyticsReview,
+  AnalyticsSection,
+} from "../analytics/types.js";
 import { STATUS_DEFINITIONS, isStatusLabel } from "../tasks/statuses.js";
 import { formatTaskTitle, inferTaskStatus, stripTaskStatusPrefixes } from "../tasks/parser.js";
 import type { CreateIssueInput, IssueStateFilter, IssueTransition, TaskGateway, TaskIssue } from "../tasks/types.js";
@@ -28,6 +43,27 @@ import { AmbiguousMilestoneCreateError, GitHubApi, GitHubApiError, expectArray, 
 
 const PAGE_SIZE = 100;
 const PULL_REQUEST_FILE_LIMIT = 3000;
+const ANALYTICS_FANOUT_CONCURRENCY = 4;
+const ANALYTICS_FANOUT_LIMIT = 100;
+const ANALYTICS_COVERAGE_ORDER: Readonly<Record<string, number>> = {
+  repository: 0,
+  issues: 1,
+  pulls: 2,
+  milestones: 3,
+  "pull-details": 4,
+  "review-requests": 5,
+  reviews: 6,
+  "issue-events": 7,
+  timelines: 8,
+  dependencies: 9,
+  checks: 10,
+  languages: 11,
+  tags: 12,
+  releases: 13,
+  "commit-activity": 14,
+  "code-frequency": 15,
+  contributors: 16,
+};
 
 function optionalString(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -198,6 +234,274 @@ function relationPullFrom(value: unknown): PullRequestReference | null {
     mergedAt: nullableString(pull.merged_at),
     url: optionalString(issue.html_url),
   };
+}
+
+function analyticsPersonFrom(value: unknown): AnalyticsPerson | null {
+  if (value === null || value === undefined) return null;
+  const user = expectObject(value, "Could not read analytics user.");
+  const databaseId = typeof user.id === "number" || typeof user.id === "string" ? String(user.id) : "";
+  const login = typeof user.login === "string" && user.login.length > 0 ? user.login : "Deleted user";
+  const deleted = login === "Deleted user";
+  return {
+    id: databaseId.length > 0 ? databaseId : deleted ? "deleted:unknown" : `login:${login.toLowerCase()}`,
+    login,
+    displayName: typeof user.name === "string" && user.name.length > 0 ? user.name : login,
+    avatarUrl: validatedAvatarUrl(user.avatar_url) || null,
+    url: validatedGitHubUrl(user.html_url) || null,
+    bot: user.type === "Bot" || login.toLowerCase().endsWith("[bot]"),
+    deleted,
+  };
+}
+
+function analyticsTeamsFrom(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const names = value.flatMap((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return [];
+    const team = item as Record<string, unknown>;
+    const name = typeof team.slug === "string" ? team.slug : typeof team.name === "string" ? team.name : "";
+    return name.trim().length === 0 ? [] : [name];
+  });
+  return [...new Set(names)];
+}
+
+function analyticsMilestoneFrom(value: unknown): AnalyticsMilestone | null {
+  const milestone = milestoneFrom(value);
+  if (milestone === null) return null;
+  const raw = expectObject(value, "Could not read analytics milestone.");
+  return {
+    ...milestone,
+    createdAt: optionalString(raw.created_at),
+    closedAt: nullableString(raw.closed_at),
+  };
+}
+
+function analyticsReleaseFrom(value: unknown): AnalyticsRelease {
+  const raw = expectObject(value, "Could not read repository release.");
+  return {
+    id: requiredNumber(raw.id, "release ID", "Could not read repository release."),
+    tagName: requiredString(raw.tag_name, "release tag", "Could not read repository release."),
+    name: optionalString(raw.name) || optionalString(raw.tag_name),
+    draft: raw.draft === true,
+    prerelease: raw.prerelease === true,
+    createdAt: optionalString(raw.created_at),
+    publishedAt: nullableString(raw.published_at),
+    url: validatedGitHubUrl(raw.html_url) || optionalString(raw.url),
+    author: analyticsPersonFrom(raw.author),
+  };
+}
+
+function analyticsIssueFrom(value: unknown): AnalyticsIssue {
+  const raw = expectObject(value, "Could not read analytics issue.");
+  const task = taskFrom(issueFrom(raw));
+  const statusLabels = labelsFrom(raw.labels).filter(isStatusLabel);
+  const stateReason = raw.state_reason === "completed" || raw.state_reason === "not_planned" || raw.state_reason === "duplicate" || raw.state_reason === "reopened"
+    ? raw.state_reason
+    : "unknown";
+  return {
+    id: requiredNumber(raw.id, "issue ID", "Could not read analytics issue."),
+    nodeId: optionalString(raw.node_id),
+    number: task.number,
+    title: task.title,
+    fullTitle: task.fullTitle,
+    state: task.state === "CLOSED" ? "closed" : "open",
+    stateReason,
+    status: task.status,
+    labels: task.labels,
+    statusLabels,
+    author: analyticsPersonFrom(raw.user),
+    assignees: Array.isArray(raw.assignees) ? raw.assignees.map(analyticsPersonFrom).filter((person): person is AnalyticsPerson => person !== null) : [],
+    milestone: milestoneFrom(raw.milestone),
+    createdAt: optionalString(raw.created_at),
+    updatedAt: optionalString(raw.updated_at),
+    closedAt: nullableString(raw.closed_at),
+    url: validatedGitHubUrl(raw.html_url) || optionalString(raw.url),
+    blockedBy: [],
+    blocking: [],
+  };
+}
+
+function analyticsReviewState(value: unknown): AnalyticsReview["state"] {
+  const state = typeof value === "string" ? value.toUpperCase() : "";
+  if (state === "APPROVED") return "approved";
+  if (state === "CHANGES_REQUESTED") return "changes-requested";
+  if (state === "COMMENTED") return "commented";
+  if (state === "DISMISSED") return "dismissed";
+  if (state === "PENDING") return "pending";
+  return "unknown";
+}
+
+function analyticsReviewFrom(value: unknown, pullNumber: number): AnalyticsReview {
+  const review = expectObject(value, "Could not read analytics review.");
+  return {
+    id: requiredNumber(review.id, "review ID", "Could not read analytics review."),
+    pullNumber,
+    reviewer: analyticsPersonFrom(review.user),
+    state: analyticsReviewState(review.state),
+    submittedAt: nullableString(review.submitted_at),
+    commitId: nullableString(review.commit_id),
+    url: validatedGitHubUrl(review.html_url) || null,
+  };
+}
+
+function eventTypeFrom(value: unknown): AnalyticsEventType | null {
+  const normalized = typeof value === "string" ? value.replaceAll("_", "-") : "";
+  const supported: Record<string, AnalyticsEventType> = {
+    assigned: "assigned",
+    closed: "closed",
+    "converted-to-draft": "converted-to-draft",
+    demilestoned: "demilestoned",
+    renamed: "renamed",
+    labeled: "labeled",
+    merged: "merged",
+    milestoned: "milestoned",
+    "ready-for-review": "ready-for-review",
+    reopened: "reopened",
+    "review-request-removed": "review-request-removed",
+    "review-requested": "review-requested",
+    unassigned: "unassigned",
+    unlabeled: "unlabeled",
+  };
+  return supported[normalized] ?? null;
+}
+
+function analyticsEventFrom(value: unknown, fallbackNumber?: number, fallbackSubject?: "issue" | "pull-request"): AnalyticsEvent | null {
+  const raw = expectObject(value, "Could not read analytics event.");
+  const type = eventTypeFrom(raw.event);
+  const issue = raw.issue !== null && typeof raw.issue === "object" && !Array.isArray(raw.issue)
+    ? expectObject(raw.issue, "Could not read analytics event subject.")
+    : null;
+  const number = typeof issue?.number === "number" ? issue.number : fallbackNumber;
+  if (type === null || number === undefined || !Number.isSafeInteger(number) || number <= 0 || typeof raw.created_at !== "string") return null;
+  const subject = fallbackSubject ?? (issue?.pull_request === undefined ? "issue" : "pull-request");
+  const label = raw.label !== null && typeof raw.label === "object" && !Array.isArray(raw.label) ? expectObject(raw.label, "Could not read event label.") : null;
+  const milestone = raw.milestone !== null && typeof raw.milestone === "object" && !Array.isArray(raw.milestone) ? expectObject(raw.milestone, "Could not read event milestone.") : null;
+  const review = raw.review !== null && typeof raw.review === "object" && !Array.isArray(raw.review) ? expectObject(raw.review, "Could not read event review.") : null;
+  const rename = raw.rename !== null && typeof raw.rename === "object" && !Array.isArray(raw.rename) ? expectObject(raw.rename, "Could not read event rename.") : null;
+  const idValue = raw.id ?? raw.node_id;
+  const id = typeof idValue === "number" || typeof idValue === "string"
+    ? String(idValue)
+    : `${subject}:${number}:${type}:${raw.created_at}`;
+  return {
+    id,
+    subject,
+    number,
+    type,
+    createdAt: raw.created_at,
+    actor: analyticsPersonFrom(raw.actor),
+    label: typeof label?.name === "string" ? label.name : null,
+    assignee: analyticsPersonFrom(raw.assignee),
+    reviewer: analyticsPersonFrom(raw.requested_reviewer),
+    milestoneTitle: typeof milestone?.title === "string" ? milestone.title : null,
+    reviewId: typeof review?.id === "number" ? review.id : null,
+    reviewState: review === null ? null : analyticsReviewState(review.state),
+    rename: typeof rename?.from === "string" && typeof rename.to === "string" ? { from: rename.from, to: rename.to } : null,
+  };
+}
+
+function coverageSource(
+  id: string,
+  label: string,
+  state: AnalyticsCoverageSource["state"],
+  loaded: number,
+  fetchedAt: string,
+  reason: string | null = null,
+  limitations: string[] = [],
+  excluded = 0,
+): AnalyticsCoverageSource {
+  return { id, label, state, loaded, knownTotal: null, from: null, to: null, fetchedAt, excluded, reason, limitations };
+}
+
+function coverageStateFor(error: unknown): AnalyticsCoverageSource["state"] {
+  if (error instanceof GitHubApiError && (error.code === "unsupported" || error.statusCode === 404 || error.statusCode === 422 || error.statusCode === 204)) return "unsupported";
+  if (error instanceof GitHubApiError && (error.code === "pending" || error.statusCode === 202)) return "pending";
+  return "error";
+}
+
+interface AnalyticsHydrationRecord {
+  number: number;
+  state: "open" | "closed";
+  milestone: { number: number } | null;
+  labels: string[];
+  author: AnalyticsPerson | null;
+  assignees: AnalyticsPerson[];
+  requestedReviewers?: AnalyticsPerson[];
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string | null;
+  mergedAt?: string | null;
+}
+
+function matchesSelectedPerson(person: AnalyticsPerson | null, selected: string): boolean {
+  return person === null
+    ? selected === "deleted-user"
+    : person.id === selected || person.login.toLowerCase() === selected.toLowerCase();
+}
+
+function matchesKnownQueryFields(
+  record: AnalyticsHydrationRecord,
+  query: AnalyticsQuery | undefined,
+  selectedLabels: readonly string[],
+): boolean {
+  if (query === undefined) return true;
+  if (query.milestone !== null && record.milestone?.number !== query.milestone) return false;
+  if (selectedLabels.some((label) => !record.labels.includes(label))) return false;
+  if (!query.includeBots && record.author?.bot === true) return false;
+  if (query.person === null) return true;
+  const matchesAuthor = matchesSelectedPerson(record.author, query.person);
+  const matchesAssignee = record.assignees.some((person) => matchesSelectedPerson(person, query.person!));
+  const matchesRequestedReviewer = (record.requestedReviewers ?? []).some((person) => matchesSelectedPerson(person, query.person!));
+  if (query.role === "author") return matchesAuthor;
+  if (query.role === "assignee") return matchesAssignee;
+  if (query.role === "reviewer") return matchesRequestedReviewer;
+  if (query.role === "actor") return false;
+  return matchesAuthor || matchesAssignee || matchesRequestedReviewer;
+}
+
+function prioritizeForAnalyticsHydration<T extends AnalyticsHydrationRecord>(
+  records: readonly T[],
+  query: AnalyticsQuery | undefined,
+): T[] {
+  const from = query === undefined ? Number.NEGATIVE_INFINITY : Date.parse(query.from);
+  const to = query === undefined ? Number.POSITIVE_INFINITY : Date.parse(query.to);
+  const selectedLabels = query?.labels.filter((label) => !isStatusLabel(label)) ?? [];
+  return records.map((record) => {
+    const periodRelevant = [record.createdAt, record.updatedAt, record.closedAt, record.mergedAt].some((value) => {
+      if (value === undefined || value === null || value.length === 0) return false;
+      const instant = Date.parse(value);
+      return Number.isFinite(instant) && instant >= from && instant < to;
+    });
+    return { record, baseMatch: matchesKnownQueryFields(record, query, selectedLabels), periodRelevant };
+  }).sort((left, right) => {
+    if (left.baseMatch !== right.baseMatch) return left.baseMatch ? -1 : 1;
+    if (left.periodRelevant !== right.periodRelevant) return left.periodRelevant ? -1 : 1;
+    if ((left.record.state === "open") !== (right.record.state === "open")) return left.record.state === "open" ? -1 : 1;
+    return right.record.updatedAt.localeCompare(left.record.updatedAt)
+      || right.record.createdAt.localeCompare(left.record.createdAt)
+      || right.record.number - left.record.number;
+  }).map(({ record }) => record);
+}
+
+async function boundedMap<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  signal: AbortSignal | undefined,
+  load: (value: T) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results = new Array<PromiseSettledResult<R>>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (nextIndex < values.length && signal?.aborted !== true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await load(values[index]!) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results.filter((result): result is PromiseSettledResult<R> => result !== undefined);
 }
 
 export class GitHubClient implements TaskGateway {
@@ -507,23 +811,42 @@ export class GitHubClient implements TaskGateway {
     return pullFrom(await this.api.restJson(this.path(`pulls/${number}`), `Could not load pull request #${number}.`));
   }
 
-  private async loadCheckRuns(number: number, sha: string): Promise<Record<string, unknown>> {
+  private async loadCheckRuns(
+    number: number,
+    sha: string,
+    signal?: AbortSignal,
+  ): Promise<{ total_count: number; check_runs: unknown[]; complete: boolean; excluded: number }> {
     const checkRuns: unknown[] = [];
-    let totalCount = 0;
+    let totalCount: number | null = null;
+    let complete = false;
     for (let page = 1; page <= 10; page += 1) {
+      if (signal?.aborted === true) throw new GitHubApiError(`Could not load checks for pull request #${number}.\n\nThe request was cancelled.`, "aborted", true, true);
       const value = expectObject(
         await this.api.restJson(
           this.path(`commits/${encodeURIComponent(sha)}/check-runs?per_page=${PAGE_SIZE}&page=${page}&filter=latest`),
           `Could not load checks for pull request #${number}.`,
+          { signal },
         ),
         `Could not load checks for pull request #${number}.`,
       );
       const pageItems = expectArray(value.check_runs, `Could not load checks for pull request #${number}.`);
-      if (typeof value.total_count === "number" && Number.isSafeInteger(value.total_count)) totalCount = value.total_count;
+      if (typeof value.total_count === "number" && Number.isSafeInteger(value.total_count) && value.total_count >= 0) totalCount = value.total_count;
       checkRuns.push(...pageItems);
-      if (pageItems.length < PAGE_SIZE || checkRuns.length >= totalCount) break;
+      if (totalCount !== null && checkRuns.length >= totalCount) {
+        complete = true;
+        break;
+      }
+      if (pageItems.length < PAGE_SIZE) {
+        complete = totalCount === null;
+        break;
+      }
     }
-    return { total_count: totalCount, check_runs: checkRuns };
+    return {
+      total_count: totalCount ?? checkRuns.length,
+      check_runs: checkRuns,
+      complete,
+      excluded: totalCount === null ? 0 : Math.max(0, totalCount - checkRuns.length),
+    };
   }
 
   private async loadPullFiles(number: number, knownTotal: number | null): Promise<{ values: unknown[]; coverage: PullRequestDetail["fileCoverage"] }> {
@@ -633,6 +956,7 @@ export class GitHubClient implements TaskGateway {
       && combinedStatus.checkRuns.every(({ conclusion }) => conclusion === "neutral" || conclusion === "skipped");
     if (hasFailedCheck || legacyState === "failure" || legacyState === "error") pullRequest.checksState = "failure";
     else if (hasPendingCheck || (combinedStatus.statuses.length > 0 && legacyState === "pending")) pullRequest.checksState = "pending";
+    else if (!combinedStatus.complete) pullRequest.checksState = "unknown";
     else if (allChecksNeutral && combinedStatus.statuses.length === 0) pullRequest.checksState = "neutral";
     else if (combinedStatus.checkRuns.length > 0 || legacyState === "success") pullRequest.checksState = "success";
     const repository = expectObject(repositoryValue, "Could not read repository merge settings.");
@@ -666,7 +990,8 @@ export class GitHubClient implements TaskGateway {
     });
     const totalLegacyStatuses = typeof status.total_count === "number" && Number.isSafeInteger(status.total_count) ? status.total_count : statuses.length;
     const totalCheckRuns = typeof checks.total_count === "number" && Number.isSafeInteger(checks.total_count) ? checks.total_count : checkRuns.length;
-    return { state: optionalString(status.state) || "pending", totalCount: totalLegacyStatuses + totalCheckRuns, statuses, checkRuns, complete: totalCheckRuns <= checkRuns.length };
+    const checkRunsComplete = typeof checks.complete === "boolean" ? checks.complete : totalCheckRuns <= checkRuns.length;
+    return { state: optionalString(status.state) || "pending", totalCount: totalLegacyStatuses + totalCheckRuns, statuses, checkRuns, complete: checkRunsComplete };
   }
 
   async updatePullRequest(number: number, input: { title?: string; body?: string; state?: "open" | "closed"; milestone?: number | null }): Promise<PullRequestSummary> {
@@ -843,5 +1168,532 @@ export class GitHubClient implements TaskGateway {
       section(async () => { const [issues, pulls] = await Promise.all([issuesPromise, pullsPromise]); return [...issues.map(taskFrom), ...pulls.items].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 10); }),
     ]);
     return { openIssues, inProgressIssues, blockedIssues, openPullRequests, assignedToMe, upcomingMilestones, recentlyUpdated };
+  }
+
+  async loadAnalyticsDataset(scope: "current" | AnalyticsSection = "current", signal?: AbortSignal, query?: AnalyticsQuery): Promise<AnalyticsDataset> {
+    const fetchedAt = new Date().toISOString();
+    const coverage: AnalyticsCoverageSource[] = [];
+    const coverageDates = new Map<string, string[]>();
+    const fallbackRepository: AnalyticsDataset["repository"] = {
+      name: this.repository.split("/").at(-1) ?? this.repository,
+      description: null,
+      visibility: "unknown",
+      defaultBranch: "",
+      license: null,
+      url: `https://github.com/${this.repository}`,
+      languages: [],
+      releases: [],
+      tags: [],
+      commitWeeks: [],
+    };
+    const loadSource = async <T>(
+      id: string,
+      label: string,
+      fallback: T,
+      load: () => Promise<T>,
+      limitations: string[] = [],
+      successfulState: AnalyticsCoverageSource["state"] = "complete",
+      successfulReason: string | null = null,
+    ): Promise<T> => {
+      try {
+        const value = await load();
+        coverage.push(coverageSource(id, label, successfulState, Array.isArray(value) ? value.length : value === null ? 0 : 1, fetchedAt, successfulReason, limitations));
+        return value;
+      } catch (error) {
+        if (error instanceof GitHubApiError && error.code === "aborted") throw error;
+        coverage.push(coverageSource(id, label, coverageStateFor(error), 0, fetchedAt, errorMessage(error), limitations));
+        return fallback;
+      }
+    };
+    const loadFanout = async <T, R>(
+      id: string,
+      label: string,
+      inputs: readonly T[],
+      load: (input: T) => Promise<R>,
+      limitations: string[] = [],
+      excluded = 0,
+    ): Promise<R[]> => {
+      const requestAborted = () => signal?.aborted === true;
+      if (requestAborted()) throw new GitHubApiError(`Could not load ${label.toLowerCase()}.\n\nThe request was cancelled.`, "aborted", true, true);
+      const results = await boundedMap(inputs, ANALYTICS_FANOUT_CONCURRENCY, signal, load);
+      if (requestAborted()) throw new GitHubApiError(`Could not load ${label.toLowerCase()}.\n\nThe request was cancelled.`, "aborted", true, true);
+      const fulfilled: R[] = [];
+      const failures: unknown[] = [];
+      for (const result of results) {
+        if (result.status === "fulfilled") fulfilled.push(result.value);
+        else {
+          if (result.reason instanceof GitHubApiError && result.reason.code === "aborted") throw result.reason;
+          failures.push(result.reason);
+        }
+      }
+      const firstFailure = failures[0];
+      const missing = failures.length + excluded;
+      const state = failures.length === inputs.length && inputs.length > 0 && firstFailure !== undefined
+        ? coverageStateFor(firstFailure)
+        : missing > 0 ? "partial" : "complete";
+      const reasonParts: string[] = [];
+      if (failures.length > 0) reasonParts.push(`${failures.length} of ${inputs.length} records could not be loaded. ${errorMessage(firstFailure)}`);
+      if (excluded > 0) reasonParts.push(`${excluded} records were excluded from per-record hydration.`);
+      coverage.push(coverageSource(
+        id,
+        label,
+        state,
+        fulfilled.length,
+        fetchedAt,
+        reasonParts.join(" ") || null,
+        limitations,
+        missing,
+      ));
+      return fulfilled;
+    };
+
+    const needsIssues = scope === "current" || scope === "summary" || scope === "issues" || scope === "contributors" || scope === "milestones";
+    const needsPulls = scope === "current" || scope === "summary" || scope === "pull-requests" || scope === "contributors" || scope === "milestones";
+    const needsMilestones = scope === "current" || scope === "summary" || scope === "milestones";
+    const issueState = scope === "current" ? "open" : "all";
+    const pullState = scope === "current" ? "open" : "all";
+    const repositoryPromise = loadSource("repository", "Repository", null, () => this.api.restJson(this.path(""), "Could not load repository analytics.", { signal }));
+    const issuesPromise = needsIssues
+      ? loadSource("issues", "Issues", [], () => this.api.allPages(this.path(`issues?state=${issueState}`), "Could not load analytics issues.", { signal }), ["Pull requests returned by the Issues API are excluded."])
+      : Promise.resolve([]);
+    const pullsPromise = needsPulls
+      ? loadSource("pulls", "Pull requests", [], () => this.api.allPages(this.path(`pulls?state=${pullState}&sort=created&direction=asc`), "Could not load analytics pull requests.", { signal }))
+      : Promise.resolve([]);
+    const milestonesPromise = needsMilestones
+      ? loadSource("milestones", "Milestones", [], () => this.api.allPages(this.path("milestones?state=all"), "Could not load analytics milestones.", { signal }))
+      : Promise.resolve([]);
+    const [repositoryValue, rawIssues, rawPulls, rawMilestones] = await Promise.all([
+      repositoryPromise,
+      issuesPromise,
+      pullsPromise,
+      milestonesPromise,
+    ]);
+    let repository = fallbackRepository;
+    if (repositoryValue !== null) {
+      const raw = expectObject(repositoryValue, "Could not read repository analytics.");
+      const license = raw.license !== null && typeof raw.license === "object" && !Array.isArray(raw.license)
+        ? expectObject(raw.license, "Could not read repository license.")
+        : null;
+      repository = {
+        ...fallbackRepository,
+        name: optionalString(raw.name) || fallbackRepository.name,
+        description: nullableString(raw.description),
+        visibility: optionalString(raw.visibility) || (raw.private === true ? "private" : "public"),
+        defaultBranch: optionalString(raw.default_branch),
+        license: typeof license?.spdx_id === "string" && license.spdx_id !== "NOASSERTION" ? license.spdx_id : null,
+        url: validatedGitHubUrl(raw.html_url) || fallbackRepository.url,
+      };
+    }
+
+    const issues = rawIssues
+      .filter((value) => expectObject(value, "Could not read analytics issue.").pull_request === undefined)
+      .map(analyticsIssueFrom);
+    const requestTeamCoverage = new Map<number, boolean>();
+    const pullRequests: AnalyticsPullRequest[] = rawPulls.map((value) => {
+      const raw = expectObject(value, "Could not read analytics pull request.");
+      const head = expectObject(raw.head, "Could not read analytics pull request head.");
+      const number = requiredNumber(raw.number, "pull request number", "Could not read analytics pull request.");
+      const requestedTeams = analyticsTeamsFrom(raw.requested_teams);
+      requestTeamCoverage.set(number, Array.isArray(raw.requested_teams) && requestedTeams.length === raw.requested_teams.length);
+      return {
+        id: requiredNumber(raw.id, "pull request ID", "Could not read analytics pull request."),
+        nodeId: optionalString(raw.node_id),
+        number,
+        title: requiredString(raw.title, "pull request title", "Could not read analytics pull request."),
+        state: raw.state === "closed" ? "closed" : "open",
+        draft: raw.draft === true,
+        mergedAt: nullableString(raw.merged_at),
+        closedAt: nullableString(raw.closed_at),
+        createdAt: optionalString(raw.created_at),
+        updatedAt: optionalString(raw.updated_at),
+        author: analyticsPersonFrom(raw.user),
+        assignees: Array.isArray(raw.assignees) ? raw.assignees.map(analyticsPersonFrom).filter((person): person is AnalyticsPerson => person !== null) : [],
+        requestedReviewers: Array.isArray(raw.requested_reviewers) ? raw.requested_reviewers.map(analyticsPersonFrom).filter((person): person is AnalyticsPerson => person !== null) : [],
+        milestone: milestoneFrom(raw.milestone),
+        labels: labelsFrom(raw.labels).filter((label) => !isStatusLabel(label)),
+        requestedTeams,
+        reviewState: raw.draft === true ? "pending" : "unknown",
+        checksState: "unknown",
+        headSha: optionalString(head.sha),
+        changedFiles: Number.isSafeInteger(raw.changed_files) ? raw.changed_files as number : null,
+        additions: Number.isSafeInteger(raw.additions) ? raw.additions as number : null,
+        deletions: Number.isSafeInteger(raw.deletions) ? raw.deletions as number : null,
+        url: validatedGitHubUrl(raw.html_url) || optionalString(raw.url),
+      };
+    });
+    const milestones = rawMilestones
+      .map(analyticsMilestoneFrom).filter((milestone): milestone is AnalyticsMilestone => milestone !== null);
+    coverageDates.set("issues", issues.map(({ createdAt }) => createdAt));
+    coverageDates.set("pulls", pullRequests.map(({ createdAt }) => createdAt));
+    coverageDates.set("milestones", milestones.map(({ createdAt }) => createdAt));
+    const fanoutPulls = prioritizeForAnalyticsHydration(pullRequests, query)
+      .slice(0, ANALYTICS_FANOUT_LIMIT);
+    const excludedFanoutPulls = Math.max(0, pullRequests.length - fanoutPulls.length);
+
+    if (scope === "pull-requests") {
+      const details = await loadFanout("pull-details", "Pull request details", fanoutPulls, (pull) =>
+        this.api.restJson(this.path(`pulls/${pull.number}`), `Could not load pull request #${pull.number} analytics.`, { signal }), ["Per-record detail reads are capped and prioritize known query matches, the selected period, and current open work."], excludedFanoutPulls);
+      const byNumber = new Map<number, Record<string, unknown>>();
+      for (const value of details) {
+        const raw = expectObject(value, "Could not read pull request analytics.");
+        byNumber.set(requiredNumber(raw.number, "pull request number", "Could not read pull request analytics."), raw);
+      }
+      for (const pull of pullRequests) {
+        const raw = byNumber.get(pull.number);
+        if (raw === undefined) continue;
+        const head = expectObject(raw.head, "Could not read pull request head.");
+        pull.headSha = optionalString(head.sha) || pull.headSha;
+        pull.changedFiles = Number.isSafeInteger(raw.changed_files) ? raw.changed_files as number : null;
+        pull.additions = Number.isSafeInteger(raw.additions) ? raw.additions as number : null;
+        pull.deletions = Number.isSafeInteger(raw.deletions) ? raw.deletions as number : null;
+        pull.requestedReviewers = Array.isArray(raw.requested_reviewers)
+          ? raw.requested_reviewers.map(analyticsPersonFrom).filter((person): person is AnalyticsPerson => person !== null)
+          : [];
+        const requestedTeams = analyticsTeamsFrom(raw.requested_teams);
+        if (Array.isArray(raw.requested_teams)) {
+          pull.requestedTeams = requestedTeams;
+          requestTeamCoverage.set(pull.number, requestedTeams.length === raw.requested_teams.length);
+        }
+      }
+    }
+
+    if (needsPulls) {
+      const identified = [...requestTeamCoverage.values()].filter(Boolean).length;
+      const excluded = pullRequests.length - identified;
+      coverage.push(coverageSource(
+        "review-requests",
+        "Review requests",
+        excluded === 0 ? "complete" : "partial",
+        identified,
+        fetchedAt,
+        excluded === 0 ? null : `${excluded} pull request records did not expose identifiable team review requests.`,
+        ["Team review requests require requested_teams entries with a stable slug or name."],
+        excluded,
+      ));
+    }
+
+    const reviews: AnalyticsReview[] = [];
+    if (scope === "pull-requests" || scope === "contributors") {
+      const groups = await loadFanout(
+        "reviews",
+        "Submitted reviews",
+        fanoutPulls,
+        async (pull) => ({ pullNumber: pull.number, values: await this.api.allPages(this.path(`pulls/${pull.number}/reviews`), `Could not load reviews for pull request #${pull.number}.`, { signal }) }),
+        ["Pending reviews have no submitted timestamp and remain explicitly pending. Per-record reads are capped and prioritize known query matches, the selected period, and current open work."],
+        excludedFanoutPulls,
+      );
+      const reviewIds = new Set<number>();
+      for (const group of groups) {
+        for (const value of group.values) {
+          const review = analyticsReviewFrom(value, group.pullNumber);
+          if (!reviewIds.has(review.id)) {
+            reviewIds.add(review.id);
+            reviews.push(review);
+          }
+        }
+      }
+      for (const pull of pullRequests) {
+        if (pull.draft) continue;
+        const latest = new Map<string, AnalyticsReview>();
+        for (const review of reviews) {
+          if (review.pullNumber !== pull.number || review.state === "pending" || review.state === "dismissed") continue;
+          const key = review.reviewer?.id ?? `deleted:${review.id}`;
+          const previous = latest.get(key);
+          if (previous === undefined || (review.submittedAt ?? "").localeCompare(previous.submittedAt ?? "") > 0) latest.set(key, review);
+        }
+        const states = [...latest.values()].map(({ state }) => state);
+        pull.reviewState = states.includes("changes-requested") ? "changes-requested"
+          : states.includes("approved") ? "approved"
+            : pull.requestedReviewers.length > 0 || pull.requestedTeams.length > 0 ? "review-required" : "unknown";
+      }
+    }
+    coverageDates.set("reviews", reviews.flatMap(({ submittedAt }) => submittedAt === null ? [] : [submittedAt]));
+
+    const eventsById = new Map<string, AnalyticsEvent>();
+    if (scope === "summary" || scope === "issues" || scope === "pull-requests" || scope === "milestones") {
+      const values = await loadSource(
+        "issue-events",
+        "Repository issue events",
+        [],
+        () => this.api.allPages(this.path("issues/events"), "Could not load repository issue events.", { signal }),
+        ["Repository issue events omit timeline-only event kinds."],
+        "partial",
+        "The repository issue-events endpoint omits timeline-only event kinds; timeline evidence is required for complete history.",
+      );
+      const sourceDates: string[] = [];
+      for (const value of values) {
+        const raw = expectObject(value, "Could not read analytics event.");
+        if (typeof raw.created_at === "string") sourceDates.push(raw.created_at);
+        const event = analyticsEventFrom(raw);
+        if (event !== null) eventsById.set(event.id, event);
+      }
+      coverageDates.set("issue-events", sourceDates);
+    }
+    if (scope === "pull-requests") {
+      const timelines = await loadFanout(
+        "timelines",
+        "Pull request timelines",
+        fanoutPulls,
+        async (pull) => ({ number: pull.number, values: await this.api.allPages(this.path(`issues/${pull.number}/timeline`), `Could not load timeline for pull request #${pull.number}.`, { signal, unsupportedOnNotFound: true }) }),
+        ["Per-record timeline reads are capped and prioritize known query matches, the selected period, and current open work."],
+        excludedFanoutPulls,
+      );
+      const sourceDates: string[] = [];
+      for (const timeline of timelines) {
+        for (const value of timeline.values) {
+          const raw = expectObject(value, "Could not read analytics event.");
+          if (typeof raw.created_at === "string") sourceDates.push(raw.created_at);
+          const event = analyticsEventFrom(raw, timeline.number, "pull-request");
+          if (event !== null) eventsById.set(event.id, event);
+        }
+      }
+      coverageDates.set("timelines", sourceDates);
+    }
+    for (const review of reviews) {
+      if (review.submittedAt === null) continue;
+      eventsById.set(`review:${review.id}`, {
+        id: `review:${review.id}`,
+        subject: "pull-request",
+        number: review.pullNumber,
+        type: "review-submitted",
+        createdAt: review.submittedAt,
+        actor: review.reviewer,
+        label: null,
+        assignee: null,
+        reviewer: review.reviewer,
+        milestoneTitle: null,
+        reviewId: review.id,
+        reviewState: review.state,
+        rename: null,
+      });
+    }
+
+    if (scope === "issues" || scope === "milestones") {
+      const dependencyIssues = prioritizeForAnalyticsHydration(issues, query).slice(0, ANALYTICS_FANOUT_LIMIT);
+      const excludedDependencyIssues = Math.max(0, issues.length - dependencyIssues.length);
+      const relations = await loadFanout(
+        "dependencies",
+        "Native issue dependencies",
+        dependencyIssues,
+        async (issue) => {
+          const [blockedByValues, blockingValues] = await Promise.all([
+            this.api.allPages(this.path(`issues/${issue.number}/dependencies/blocked_by`), `Could not load blockers for issue #${issue.number}.`, { signal, unsupportedOnNotFound: true }),
+            this.api.allPages(this.path(`issues/${issue.number}/dependencies/blocking`), `Could not load dependents for issue #${issue.number}.`, { signal, unsupportedOnNotFound: true }),
+          ]);
+          const dependencyNumbers = (values: unknown[]): { numbers: number[]; excluded: number } => {
+            const numbers: number[] = [];
+            let excluded = 0;
+            for (const value of values) {
+              const number = expectObject(value, "Could not read issue dependency.").number;
+              if (typeof number === "number" && Number.isSafeInteger(number) && number > 0) numbers.push(number);
+              else excluded += 1;
+            }
+            return { numbers, excluded };
+          };
+          const blockedBy = dependencyNumbers(blockedByValues);
+          const blocking = dependencyNumbers(blockingValues);
+          return {
+            number: issue.number,
+            blockedBy: blockedBy.numbers,
+            blocking: blocking.numbers,
+            excluded: blockedBy.excluded + blocking.excluded,
+          };
+        },
+        ["The Issue Dependencies API may be unavailable for a repository or account plan. Per-record reads are capped and prioritize known query matches, the selected period, and current open work."],
+        excludedDependencyIssues,
+      );
+      const issueByNumber = new Map(issues.map((issue) => [issue.number, issue]));
+      let dependencyExclusions = 0;
+      for (const relation of relations) {
+        const issue = issueByNumber.get(relation.number);
+        dependencyExclusions += relation.excluded;
+        if (issue !== undefined) {
+          issue.blockedBy = [...new Set(relation.blockedBy)];
+          issue.blocking = [...new Set(relation.blocking)];
+          dependencyExclusions += issue.blockedBy.filter((number) => !issueByNumber.has(number)).length;
+          dependencyExclusions += issue.blocking.filter((number) => !issueByNumber.has(number)).length;
+        }
+      }
+      if (dependencyExclusions > 0) {
+        const source = coverage.find(({ id }) => id === "dependencies");
+        if (source !== undefined) {
+          source.state = "partial";
+          source.excluded += dependencyExclusions;
+          const detail = `${dependencyExclusions} dependency records could not be matched to loaded issues.`;
+          source.reason = source.reason === null ? detail : `${source.reason} ${detail}`;
+        }
+      }
+    }
+
+    if (scope === "pull-requests") {
+      const currentPulls = pullRequests
+        .filter((pull) => pull.state === "open" && pull.headSha.length > 0);
+      const checkPulls = prioritizeForAnalyticsHydration(currentPulls, query).slice(0, ANALYTICS_FANOUT_LIMIT);
+      const excludedCheckPulls = Math.max(0, currentPulls.length - checkPulls.length);
+      const checks = await loadFanout("checks", "Current checks and commit statuses", checkPulls, async (pull) => {
+        const [statusValue, checksResponse] = await Promise.all([
+          this.api.restJson(this.path(`commits/${encodeURIComponent(pull.headSha)}/status`), `Could not load commit status for pull request #${pull.number}.`, { signal }),
+          this.loadCheckRuns(pull.number, pull.headSha, signal),
+        ]);
+        const checksValue = expectArray(checksResponse.check_runs, `Could not load checks for pull request #${pull.number}.`);
+        const status = expectObject(statusValue, "Could not read combined commit status.");
+        const statusItems = Array.isArray(status.statuses) ? status.statuses : [];
+        const hasCommitStatuses = statusItems.length > 0 || (typeof status.total_count === "number" && status.total_count > 0);
+        const states = [
+          ...(hasCommitStatuses && typeof status.state === "string" ? [status.state.toLowerCase()] : []),
+          ...checksValue.map((value) => {
+            const check = expectObject(value, "Could not read check run.");
+            return typeof check.status === "string" && check.status !== "completed" ? "pending"
+              : typeof check.conclusion === "string" ? check.conclusion.toLowerCase() : "";
+          }),
+        ];
+        const checksState: ChecksState = states.some((state) => ["failure", "error", "cancelled", "timed_out", "action_required", "startup_failure"].includes(state)) ? "failure"
+          : states.some((state) => ["pending", "queued", "in_progress"].includes(state)) ? "pending"
+            : !checksResponse.complete ? "unknown"
+              : states.includes("success") ? "success"
+                : states.some((state) => state === "neutral" || state === "skipped") ? "neutral" : "unknown";
+        return {
+          number: pull.number,
+          checksState,
+          checkRunsComplete: checksResponse.complete,
+          excludedCheckRuns: checksResponse.excluded,
+        };
+      }, ["Current check reads are capped and prioritize known query matches, the selected period, and deterministic recency."], excludedCheckPulls);
+      const pullByNumber = new Map(pullRequests.map((pull) => [pull.number, pull]));
+      for (const check of checks) {
+        const pull = pullByNumber.get(check.number);
+        if (pull !== undefined) pull.checksState = check.checksState;
+      }
+      const incompleteCheckRuns = checks.filter(({ checkRunsComplete }) => !checkRunsComplete);
+      if (incompleteCheckRuns.length > 0) {
+        const source = coverage.find(({ id }) => id === "checks");
+        if (source !== undefined) {
+          const excludedCheckRuns = incompleteCheckRuns.reduce((total, check) => total + check.excludedCheckRuns, 0);
+          source.state = "partial";
+          source.excluded += excludedCheckRuns;
+          const detail = excludedCheckRuns > 0
+            ? `${excludedCheckRuns} check runs were excluded by the per-commit pagination cap.`
+            : "Check-run pagination reached its cap before completeness could be established.";
+          source.reason = source.reason === null ? detail : `${source.reason} ${detail}`;
+        }
+      }
+    }
+
+    if (scope === "summary") {
+      const releases = await loadSource("releases", "Repository releases", [], () =>
+        this.api.allPages(this.path("releases"), "Could not load repository releases.", { signal }));
+      repository.releases = releases.map(analyticsReleaseFrom);
+      coverageDates.set("releases", repository.releases.flatMap(({ publishedAt, createdAt }) => [publishedAt ?? createdAt]));
+    }
+
+    if (scope === "repository") {
+      const loadStatistic = async (id: string, label: string, path: string): Promise<unknown | null> => {
+        try {
+          const response = await this.api.restJsonResponse(this.path(path), `Could not load ${label.toLowerCase()}.`, { signal });
+          if (response.status === 202 || response.status === 204) {
+            coverage.push(coverageSource(
+              id,
+              label,
+              response.status === 202 ? "pending" : "unsupported",
+              0,
+              fetchedAt,
+              response.status === 202 ? "GitHub is preparing this repository statistic." : "GitHub returned no statistics for this repository.",
+              ["Statistics exclude merge commits; contributor statistics also exclude empty commits."],
+            ));
+            return null;
+          }
+          coverage.push(coverageSource(id, label, "complete", Array.isArray(response.value) ? response.value.length : 0, fetchedAt, null, ["Statistics exclude merge commits; contributor statistics also exclude empty commits."]));
+          return response.value;
+        } catch (error) {
+          if (error instanceof GitHubApiError && error.code === "aborted") throw error;
+          coverage.push(coverageSource(id, label, coverageStateFor(error), 0, fetchedAt, errorMessage(error), ["Statistics exclude merge commits; contributor statistics also exclude empty commits."]));
+          return null;
+        }
+      };
+      const [languagesValue, tags, releases, commitActivity, codeFrequency, contributors] = await Promise.all([
+        loadSource("languages", "Repository languages", null, () => this.api.restJson(this.path("languages"), "Could not load repository languages.", { signal })),
+        loadSource("tags", "Repository tags", [], () => this.api.allPages(this.path("tags"), "Could not load repository tags.", { signal })),
+        loadSource("releases", "Repository releases", [], () => this.api.allPages(this.path("releases"), "Could not load repository releases.", { signal })),
+        loadStatistic("commit-activity", "Commit activity", "stats/commit_activity"),
+        loadStatistic("code-frequency", "Code frequency", "stats/code_frequency"),
+        loadStatistic("contributors", "Contributor statistics", "stats/contributors"),
+      ]);
+      if (languagesValue !== null) {
+        repository.languages = Object.entries(expectObject(languagesValue, "Could not read repository languages."))
+          .flatMap(([name, bytes]) => typeof bytes === "number" && Number.isFinite(bytes) && bytes >= 0 ? [{ name, bytes }] : [])
+          .sort((left, right) => right.bytes - left.bytes || left.name.localeCompare(right.name));
+      }
+      repository.tags = tags.flatMap((value) => {
+        const raw = expectObject(value, "Could not read repository tag.");
+        const commit = expectObject(raw.commit, "Could not read repository tag commit.");
+        return typeof raw.name === "string" && typeof commit.sha === "string"
+          ? [{ name: raw.name, commitSha: commit.sha, url: `${repository.url}/tree/${encodeURIComponent(raw.name)}` }]
+          : [];
+      });
+      repository.releases = releases.map(analyticsReleaseFrom);
+      coverageDates.set("releases", repository.releases.flatMap(({ publishedAt, createdAt }) => [publishedAt ?? createdAt]));
+      const aggregateWeeks = new Map<string, AnalyticsCommitWeek>();
+      const commitActivityDates: string[] = [];
+      const codeFrequencyDates: string[] = [];
+      if (Array.isArray(commitActivity)) {
+        for (const value of commitActivity) {
+          const raw = expectObject(value, "Could not read commit activity.");
+          if (typeof raw.week !== "number") continue;
+          const week = new Date(raw.week * 1000).toISOString();
+          commitActivityDates.push(week);
+          aggregateWeeks.set(week, { week, source: "aggregate", commits: typeof raw.total === "number" ? raw.total : 0, additions: null, deletions: null, author: null });
+        }
+      }
+      coverageDates.set("commit-activity", commitActivityDates);
+      if (Array.isArray(codeFrequency)) {
+        for (const value of codeFrequency) {
+          if (!Array.isArray(value) || typeof value[0] !== "number") continue;
+          const week = new Date(value[0] * 1000).toISOString();
+          codeFrequencyDates.push(week);
+          const existing: AnalyticsCommitWeek = aggregateWeeks.get(week) ?? { week, source: "aggregate", commits: 0, additions: null, deletions: null, author: null };
+          existing.additions = typeof value[1] === "number" ? value[1] : null;
+          existing.deletions = typeof value[2] === "number" ? Math.abs(value[2]) : null;
+          aggregateWeeks.set(week, existing);
+        }
+      }
+      coverageDates.set("code-frequency", codeFrequencyDates);
+      const contributorWeeks: AnalyticsCommitWeek[] = [];
+      const contributorDates: string[] = [];
+      if (Array.isArray(contributors)) {
+        for (const value of contributors) {
+          const raw = expectObject(value, "Could not read contributor statistics.");
+          const author = analyticsPersonFrom(raw.author);
+          if (!Array.isArray(raw.weeks)) continue;
+          for (const valueWeek of raw.weeks) {
+            const weekRaw = expectObject(valueWeek, "Could not read contributor week.");
+            if (typeof weekRaw.w !== "number") continue;
+            const week = new Date(weekRaw.w * 1000).toISOString();
+            contributorDates.push(week);
+            contributorWeeks.push({
+              week,
+              source: "contributor",
+              commits: typeof weekRaw.c === "number" ? weekRaw.c : 0,
+              additions: typeof weekRaw.a === "number" ? weekRaw.a : null,
+              deletions: typeof weekRaw.d === "number" ? weekRaw.d : null,
+              author,
+            });
+          }
+        }
+      }
+      coverageDates.set("contributors", contributorDates);
+      repository.commitWeeks = [...aggregateWeeks.values(), ...contributorWeeks]
+        .sort((left, right) => left.week.localeCompare(right.week) || (left.author?.id ?? "").localeCompare(right.author?.id ?? ""));
+    }
+
+    coverage.sort((left, right) =>
+      (ANALYTICS_COVERAGE_ORDER[left.id] ?? Number.MAX_SAFE_INTEGER) - (ANALYTICS_COVERAGE_ORDER[right.id] ?? Number.MAX_SAFE_INTEGER) ||
+      left.id.localeCompare(right.id));
+    const events = [...eventsById.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    for (const source of coverage) {
+      const dates = (coverageDates.get(source.id) ?? []).filter((date) => date.length > 0).sort();
+      source.from = dates[0] ?? null;
+      source.to = dates.at(-1) ?? null;
+    }
+    return { repository, issues, pullRequests, reviews, events, milestones, coverage, fetchedAt };
   }
 }

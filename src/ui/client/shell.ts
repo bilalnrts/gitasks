@@ -7,6 +7,7 @@ const NAV_PATHS: Record<RouteName, string> = {
   activity: "/activity",
   "pull-requests": "/pull-requests",
   milestones: "/milestones",
+  analytics: "/analytics",
 };
 
 export class Shell {
@@ -65,7 +66,7 @@ export class Shell {
   setContext(context: RepositoryContext): void {
     this.repository.textContent = context.repository || "Repository unavailable";
     this.repository.title = context.repository || "Repository unavailable";
-    this.version.textContent = context.version ? `v${context.version}` : "v0.4.0";
+    this.version.textContent = context.version ? `v${context.version}` : "v0.5.0";
     const url = safeUrl(context.repositoryUrl);
     if (url) {
       this.repositoryLink.href = url;

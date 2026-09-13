@@ -27,7 +27,7 @@ const overlays = new OverlayManager(overlayRoot);
 const toasts = new ToastManager(toastRoot, announcer);
 const mutations = new MutationCoordinator();
 const shell = new Shell();
-const context: RepositoryContext = { repository: "Repository unavailable", version: "0.4.0" };
+const context: RepositoryContext = { repository: "Repository unavailable", version: "0.5.0" };
 const services: AppServices = {
   api,
   router,
@@ -38,6 +38,63 @@ const services: AppServices = {
   overlayRoot,
   announce: (message, urgent = false) => toasts.announce(message, urgent),
 };
+
+class LazyAnalyticsView implements ViewController {
+  private readonly root: HTMLElement;
+  private readonly services: AppServices;
+  private route: AppRoute;
+  private view: ViewController | undefined;
+  private disposed = false;
+
+  constructor(rootElement: HTMLElement, appServices: AppServices, route: AppRoute) {
+    this.root = rootElement;
+    this.services = appServices;
+    this.route = route;
+    this.root.replaceChildren(
+      el("div", { className: "page" },
+        pageHeaderForLazyAnalytics(),
+        statePanel("loading", "Opening repository analytics", "Loading the analytics workspace…"),
+      ),
+    );
+    void this.load();
+  }
+
+  update(route: AppRoute): void {
+    this.route = route;
+    this.view?.update(route);
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.view?.dispose();
+  }
+
+  private async load(): Promise<void> {
+    try {
+      // Analytics is intentionally route-lazy so its charts, filters, and CSV code do not execute in the five existing routes.
+      const { AnalyticsView } = await import("./views/analytics.js");
+      if (this.disposed) return;
+      this.view = new AnalyticsView(this.root, this.services, this.route);
+    } catch (error) {
+      if (this.disposed) return;
+      this.root.replaceChildren(
+        el("div", { className: "page" },
+          pageHeaderForLazyAnalytics(),
+          statePanel("error", "Analytics could not be opened", apiErrorDescription(error)),
+        ),
+      );
+    }
+  }
+}
+
+function pageHeaderForLazyAnalytics(): HTMLElement {
+  return el("header", { className: "page-header" },
+    el("div", {},
+      el("p", { className: "eyebrow", text: "Repository intelligence" }),
+      el("h1", { text: "Analytics", attrs: { tabindex: "-1" } }),
+    ),
+  );
+}
 
 let controller: ViewController | undefined;
 let activeRoute: RouteName | undefined;
@@ -50,12 +107,13 @@ function createView(route: AppRoute): ViewController {
     case "activity": return new ActivityView(root, services, route);
     case "pull-requests": return new PullRequestsView(root, services, route);
     case "milestones": return new MilestonesView(root, services, route);
+    case "analytics": return new LazyAnalyticsView(root, services, route);
   }
 }
 
 function activate(route: AppRoute, kind: "push" | "replace" | "pop"): void {
-  shell.setRoute(route.name);
-  document.title = `${route.name === "pull-requests" ? "Pull Requests" : route.name[0]?.toUpperCase()}${route.name === "pull-requests" ? "" : route.name.slice(1)} · Gitasks`;
+  const title = route.name === "pull-requests" ? "Pull Requests" : route.name[0]?.toUpperCase() + route.name.slice(1);
+  document.title = `${title} · Gitasks`;
   if (activeRoute === route.name && controller) {
     controller.update(route);
     return;

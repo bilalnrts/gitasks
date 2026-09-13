@@ -6,6 +6,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { AnalyticsQueryError, AnalyticsService } from "../analytics/service.js";
+import type { AnalyticsDataset, AnalyticsQuery, AnalyticsSection } from "../analytics/types.js";
 import { createTaskIssue, normalizeIssueStateFilter, transitionTask } from "../tasks/service.js";
 import { STATUS_DEFINITIONS } from "../tasks/statuses.js";
 import type { CreateIssueInput, IssueStateFilter, TaskCreator, TaskGateway, TaskIssue } from "../tasks/types.js";
@@ -55,6 +57,7 @@ const SHELL_ROUTES: Record<string, true> = {
   "/activity": true,
   "/pull-requests": true,
   "/milestones": true,
+  "/analytics": true,
 };
 
 export interface BoardGateway extends TaskGateway, TaskCreator {
@@ -84,6 +87,7 @@ export interface BoardGateway extends TaskGateway, TaskCreator {
   mergePullRequest?(number: number, method: MergeMethod, expectedHeadSha: string): Promise<PullRequestSummary>;
   listActivity?(page: number): Promise<ListPage<ActivityEvent>>;
   getOverview?(): Promise<OverviewPayload>;
+  loadAnalyticsDataset?(scope?: "current" | AnalyticsSection, signal?: AbortSignal, query?: AnalyticsQuery): Promise<AnalyticsDataset>;
 }
 
 export interface UiServerOptions {
@@ -256,6 +260,16 @@ function errorPayload(error: unknown, stateVerified?: boolean) {
 
 function createRequestHandler(options: Omit<UiServerOptions, "port" | "assetDirectory" | "csrfToken">, assets: UiAssets, csrfToken: string, getAuthority: () => string) {
   const mutations = new KeyedMutationQueue();
+  const analyticsGateway = options.gateway.loadAnalyticsDataset === undefined ? null : {
+    loadAnalyticsDataset: (scope?: "current" | AnalyticsSection, signal?: AbortSignal, query?: AnalyticsQuery) => options.gateway.loadAnalyticsDataset!(scope, signal, query),
+  };
+  const analytics = analyticsGateway === null ? null : new AnalyticsService({
+    repository: options.repository,
+    gateway: analyticsGateway,
+    authenticatedUser: options.gateway.getContext === undefined
+      ? async () => "unknown-user"
+      : async () => (await options.gateway.getContext!()).currentUser.login,
+  });
 
   function runIssueRelationMutation<T>(firstNumber: number, secondNumber: number, action: () => Promise<T>): Promise<T> {
     const keys = [firstNumber, secondNumber].sort((left, right) => left - right).map((number) => `issue:${number}`);
@@ -276,10 +290,41 @@ function createRequestHandler(options: Omit<UiServerOptions, "port" | "assetDire
   }
 
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    let trustedRequest = false;
     try {
       validateRequestSource(request, getAuthority(), csrfToken);
+      trustedRequest = true;
       const requestUrl = new URL(request.url ?? "/", `http://${getAuthority()}`);
       const path = requestUrl.pathname;
+
+      if (request.method === "GET" && (path === "/api/analytics/bootstrap" || path === "/api/analytics")) {
+        const analyticsService = analytics;
+        if (analyticsService === null) throw new HttpError(501, "Repository analytics is not supported by this GitHub gateway.", "unsupported");
+        const controller = new AbortController();
+        const abortRequest = (): void => controller.abort();
+        request.once("aborted", abortRequest);
+        response.once("close", abortRequest);
+        if (request.destroyed || response.destroyed) controller.abort();
+        try {
+          await mutations.waitAll();
+          if (controller.signal.aborted) return;
+          const analyticsParams = new URLSearchParams(requestUrl.searchParams);
+          const refreshValues = analyticsParams.getAll("refresh");
+          if (refreshValues.length > 1 || (refreshValues.length === 1 && refreshValues[0] !== "1")) {
+            throw new AnalyticsQueryError("Analytics refresh must be 1 when provided.");
+          }
+          analyticsParams.delete("refresh");
+          const refresh = refreshValues.length === 1;
+          const payload = path === "/api/analytics/bootstrap"
+            ? await analyticsService.bootstrap(analyticsParams, controller.signal, refresh)
+            : await analyticsService.section(analyticsParams, controller.signal, refresh);
+          if (!response.destroyed) sendJson(response, 200, payload);
+        } finally {
+          request.removeListener("aborted", abortRequest);
+          response.removeListener("close", abortRequest);
+        }
+        return;
+      }
 
       if (request.method === "GET" && path === "/api/context") {
         ensureCapability(options.gateway.getContext !== undefined, "Workspace context");
@@ -628,6 +673,15 @@ function createRequestHandler(options: Omit<UiServerOptions, "port" | "assetDire
       }
       sendJson(response, 404, { error: { message: "Not found.", code: "not-found", retryable: false, stateVerified: true } });
     } catch (error) {
+      if (response.destroyed) return;
+      if (error instanceof AnalyticsQueryError) {
+        sendJson(response, 400, { error: { message: error.message, code: "validation", retryable: false, stateVerified: true } });
+        return;
+      }
+      if (error instanceof Error && error.name === "AbortError") {
+        sendJson(response, 499, { error: { message: "Analytics request cancelled.", code: "aborted", retryable: true, stateVerified: true } });
+        return;
+      }
       if (error instanceof RequestValidationError || error instanceof HttpError) {
         sendJson(response, error.statusCode, { error: errorPayload(error, true) });
         return;
@@ -642,7 +696,8 @@ function createRequestHandler(options: Omit<UiServerOptions, "port" | "assetDire
             : error.code === "not-found" || error.statusCode === 404 ? 404
               : error.statusCode === 409 ? 409
                 : error.code === "permission" || error.code === "authentication" ? 403
-                  : 502;
+                  : error.code === "aborted" ? 499
+                    : 502;
         sendJson(response, status, { error: errorPayload(error) });
         return;
       }
@@ -651,6 +706,8 @@ function createRequestHandler(options: Omit<UiServerOptions, "port" | "assetDire
         return;
       }
       sendJson(response, 500, { error: { ...errorPayload(error), message: `Unexpected server error: ${errorMessage(error)}` } });
+    } finally {
+      if (trustedRequest && request.method !== "GET" && request.url?.startsWith("/api/") === true) analytics?.invalidate();
     }
   };
 }

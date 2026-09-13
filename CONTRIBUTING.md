@@ -40,6 +40,10 @@ src/github/                gh-backed GitHub transport and mapping
 src/workspace/             Workspace API contracts
 src/ui/server.ts           Loopback HTTP API and security boundary
 src/ui/client/             Framework-free browser routes and components
+src/analytics/            Analytics query, time, compute, CSV, and service logic
+docs/analytics-metrics.md Public metric IDs, formulas, source, coverage, and limits
+scripts/benchmark-analytics.mjs
+                          Large-fixture analytics benchmark
 test/                      Command, server, and workspace contract tests
 ```
 
@@ -70,6 +74,8 @@ Unit and integration tests must use fixtures or command fakes and must not mutat
 
 Do not publish a package or create a release as part of a contribution.
 
+A source version, Git tag, published GitHub Release, and npm publication are separate states. Ordinary contributions must not create a tag or GitHub Release, and must not run `npm publish`. Maintainers decide and perform each release action separately.
+
 ## Implementation expectations
 
 - Preserve Node.js 20+ TypeScript ESM and Commander conventions.
@@ -81,6 +87,56 @@ Do not publish a package or create a release as part of a contribution.
 - Preserve unrelated issue fields during status changes and serialize conflicting mutations by entity.
 - Show loading, empty, filtered-empty, partial, permission, unsupported, pending, error, and retry states honestly. Do not add fake controls or inferred totals.
 - Add or update tests for observable contracts changed by the contribution. Do not place tokens, personal data, issue content, screenshots, prompts, or model output in tests or logs.
+
+## Adding or changing an Analytics metric
+
+Repository Analytics has two frozen public contracts:
+
+- `src/analytics/types.ts` is the only cross-layer model. Extend that model when a genuinely new returned field is required; do not define a second analytics payload shape in the server, browser, tests, or CSV code.
+- `docs/analytics-metrics.md` is the calculation contract. A metric change is incomplete until its stable ID, display name, question, formula, source, time basis, kind, unit, deduplication key, supported roles and filters, inclusions, exclusions, comparison behavior, coverage limits, and drill-down record type agree with the implementation.
+
+Use the existing dotted metric-ID namespace and preserve an existing ID when its meaning is unchanged. Never reuse an ID for a different question or silently change its denominator, event type, attribution, or time basis. If the formula's observable meaning must change, update the public dictionary and changelog in the same pull request and call out compatibility impact.
+
+Keep formulas centralized in `src/analytics/compute.ts`. The service loads and validates source data; the browser renders the returned payload and must not independently recalculate totals, durations, comparisons, buckets, or filter semantics. CSV must derive from the returned table rows through the shared CSV implementation rather than reproducing a metric formula.
+
+For each metric:
+
+1. Identify whether it is **current**, **period event**, or **historical**, and use the shared `[from, to)` and IANA-time-zone bucketing rules.
+2. Select the stable GitHub database ID used for record, event, review, release, or week deduplication and drill-down. Do not deduplicate repeated close/reopen events as if they were unique issues unless the metric explicitly asks for a unique-record count.
+3. State whether each filter is based on event-time evidence, current record fields, record fields, or is not applicable. Disable irrelevant filters rather than accepting and ignoring them.
+4. Return complete metadata: sample size, numerator and denominator where relevant, period, calculation time, previous value and change when supported, calculation text, warnings, detail IDs, and coverage.
+5. Treat missing pages, fields, permissions, dates, identities, or optional sources as unknown. Use **partial**, **unsupported**, **pending**, or **error** with a reason and limitations; never replace unknown data with zero or disable unrelated metrics.
+
+### Hand-calculated fixtures
+
+Add a small deterministic fixture whose expected result can be calculated by hand. Include boundary timestamps at the inclusive start and exclusive end where relevant, an even-sized median sample, a nearest-rank P75 sample, repeated events, multi-label or multi-assignee records when supported, and a missing or contradictory source case that exercises truthful coverage. Use synthetic IDs, logins, titles, and timestamps; fixtures must not contain repository data, screenshots, credentials, prompts, model output, or personal data.
+
+Write down the arithmetic in the test structure through explicit inputs and expected values, not by calling production helpers to calculate the expectation. Assert the observable metric contract—value, sample, numerator/denominator, period and comparison, filter basis, coverage/warnings, and exact drill-down IDs. A fixture for a duration metric must prove which records were included and excluded; a grouped fixture must prove whether totals may legitimately exceed the unique-record count.
+
+### Large-fixture benchmark
+
+Extend `scripts/benchmark-analytics.mjs` when a new source, join, grouping, or fan-out can change large-repository cost. Use deterministic generated records with stable synthetic IDs and fixed timestamps. Exercise the affected section at representative large-fixture sizes, keep the input reproducible, and report elapsed time, record counts, and relevant process memory without network access. Benchmark the full changed calculation path rather than a toy helper, and verify that per-record GitHub reads remain concurrency-bounded. Benchmark results are diagnostic evidence, not a correctness test or a reason to hide partial coverage.
+
+Run the benchmark explicitly when applicable:
+
+```bash
+node scripts/benchmark-analytics.mjs
+```
+
+Include the fixture size, command, environment, and observed before/after measurements in the pull request. Do not present unrun or incomparable measurements as results.
+
+### Chart, table, drill-down, and CSV parity
+
+For every KPI or chart change, validate the browser against the same returned payload used by the test:
+
+- each chart series total equals its table alternative total for the same filters and buckets;
+- chart points and KPI drill-downs retain exactly the returned stable IDs, including event IDs when events—not unique records—are counted;
+- search, sorting, and pagination change table presentation without changing the reported total scope;
+- CSV exports all filtered table rows rather than only the visible page, with the same columns, values, ordering contract, period, filters, coverage, and calculation metadata;
+- RFC 4180 quoting preserves Unicode and embedded CR/LF, and optional leading whitespace before `=`, `+`, `-`, or `@` cannot bypass spreadsheet formula-injection protection;
+- complete, partial, unsupported, pending, error, incomplete-period, unavailable-value, and disabled-filter states remain distinguishable in both chart and table views.
+
+Record which focused tests and manual browser scenarios were actually run. Do not claim chart/table/CSV parity from a unit test alone, and do not claim a browser check that was not performed.
 
 ## Pull requests
 

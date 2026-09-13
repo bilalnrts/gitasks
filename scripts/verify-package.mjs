@@ -7,12 +7,13 @@ import { tmpdir } from "node:os";
 
 import { buildRelease } from "./build.mjs";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const rootDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
 const expectedFiles = [
   "CHANGELOG.md",
   "LICENSE",
   "README.md",
+  "docs/analytics-metrics.md",
   "SECURITY.md",
   "dist/cli.js",
   "dist/ui/app.js",

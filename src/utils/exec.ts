@@ -5,6 +5,7 @@ import { CommandError } from "./errors.js";
 
 export interface RunOptions {
   cwd?: string;
+  signal?: AbortSignal | undefined;
 }
 
 export interface CommandResult {

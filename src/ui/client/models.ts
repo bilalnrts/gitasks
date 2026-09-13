@@ -20,6 +20,8 @@ import type {
   WorkspaceContext,
 } from "../../workspace/types.js";
 
+export type * from "../../analytics/types.js";
+
 export type {
   ActivityEvent,
   ApiErrorPayload,
@@ -54,7 +56,7 @@ export const WORKFLOW_STATUSES = [
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
 export type IssueState = "open" | "closed" | "all";
 export type ViewKind = "board" | "list";
-export type RouteName = "overview" | "tasks" | "activity" | "pull-requests" | "milestones";
+export type RouteName = "overview" | "tasks" | "activity" | "pull-requests" | "milestones" | "analytics";
 
 export interface StatusDefinition {
   name: WorkflowStatus;
