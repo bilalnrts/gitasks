@@ -15,8 +15,26 @@ import { runCommand, type CommandRunner } from "../src/utils/exec.js";
 import type { CreateIssueInput, IssueTransition, TaskIssue } from "../src/tasks/types.js";
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(reason?: unknown): void } {
-  const constructor = Promise as PromiseConstructor & { withResolvers<U>(): { promise: Promise<U>; resolve(value: U): void; reject(reason?: unknown): void } };
-  return constructor.withResolvers<T>();
+  const events = new EventEmitter();
+  let settled = false;
+  const promise = once(events, "settled").then(([result]) => {
+    const outcome = result as { rejected: boolean; value?: T; reason?: unknown };
+    if (outcome.rejected) throw outcome.reason;
+    return outcome.value as T;
+  });
+  return {
+    promise,
+    resolve(value) {
+      if (settled) return;
+      settled = true;
+      events.emit("settled", { rejected: false, value });
+    },
+    reject(reason) {
+      if (settled) return;
+      settled = true;
+      events.emit("settled", { rejected: true, reason });
+    },
+  };
 }
 
 const ISSUE: TaskIssue = { number: 1, title: "[TODO] Analytics", body: "", state: "OPEN", labels: ["status:todo"], assignees: [], url: "https://github.com/acme/example/issues/1" };
